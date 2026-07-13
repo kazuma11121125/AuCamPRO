@@ -80,6 +80,15 @@ Tanner Hellandの黒体放射近似式でKelvin→RGB変換し、補正ゲイン
 
 **確信度の明示**: この近似式はCIE標準観測者から厳密に導出されたものではなく、実機での色再現(センサーのカラーフィルタ特性・ISPのレンダリング意図)は端末依存であり、Phase5の実機検証(グレーカード等の目視確認)なしには色精度を断定できない。
 
+### CameraCapabilityInspector(§1.1, camera/CameraCapabilityInspector.kt)・実機検証で発見・修正した2件
+
+作業中にUSBデバッグ接続された実機(**Sony SO-51C, Android 14 / API 34, arm64-v8a**)が使えるようになったため、この端末に対して`assembleDebug`のインストール・起動・診断ログ出力による実動作検証を実施した。コンパイルが通ることと正しく動くことの違いを示す、まさに象徴的な2件の実バグをこの場で発見・修正した:
+
+1. **`NoSuchFieldError`によるクラッシュ**: `CameraCharacteristics.COLOR_CORRECTION_AVAILABLE_MODES`というキーを使用していたが、これはcompileSdk 36のandroid.jarスタブには存在してコンパイルは通るものの、この実機(API34)のframework.jarには存在せず起動直後にクラッシュした。API21から一貫して存在する`REQUEST_AVAILABLE_CAPABILITIES`の`MANUAL_POST_PROCESSING`ケイパビリティを使う、より安全な判定方式に置き換えた。
+2. **`findStandardRearLens()`の誤判定**: 素朴な「35mm換算焦点距離が28mmに最も近いレンズ」ヒューリスティックが、この実機の6つの背面/前面カメラIDのうち、**極小センサー(対角線3.0mm)の補助センサー(id=5, 焦点距離2.14mm)を「標準レンズ」として誤選択**した(小センサー×短焦点距離の組み合わせが偶然28mm付近の換算値を生んだため)。`REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA`(Androidが「アプリはこれをメインカメラとして使うべき」と意図して提供するシグナル)を最優先の判定基準とし、対角線5mm未満の極小センサーを候補から除外する安全策を追加。修正後、この実機では正しくid=0(FULLレベル・logical multi-camera・焦点距離5.11mm)を選択することを確認した。
+
+**この実機で確認できた実データ**(Phase5の実機検証手順に転記予定): `SENSOR_INFO_TIMESTAMP_SOURCE=REALTIME`(この端末ではUNKNOWN較正パスは検証不可、別端末が必要)、背面メインカメラは`INFO_SUPPORTED_HARDWARE_LEVEL_FULL`かつ`COLOR_CORRECTION_MODE_TRANSFORM_MATRIX`対応、3840x2160@30fps HEVC 50Mbpsおよび1920x1080@60fps H.264 20Mbps両方とも`MediaCodecList`上でサポート確認済み。
+
 ---
 
 ## 採用バージョン一覧(2026-07-13 時点で実在確認済み)
