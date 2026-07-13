@@ -10,118 +10,69 @@ package com.procamera.recorder.muxer
  * thread and audio-side calls to the Audio Encoder thread (matching the thread model in
  * docs/ARCHITECTURE.md); the two sides never touch shared mutable state with each other
  * except the immutable [recordingStartNanos] captured once in [start].
+ *
+ * **実機で修正済み(確信度の教訓)**: このクラスは当初、`CaptureRequest`の
+ * `CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE`(REALTIME=CLOCK_BOOTTIME /
+ * UNKNOWN=較正が必要)に応じて分岐する設計だった — `VideoEncoder`の
+ * `bufferInfo.presentationTimeUs`が`CaptureResult.SENSOR_TIMESTAMP`と同じ生クロック
+ * ドメインをそのまま伝播すると仮定していたため。実機(Sony SO-51C、
+ * SENSOR_INFO_TIMESTAMP_SOURCE=REALTIME)での診断ログにより、この仮定は**誤り**と判明:
+ * `presentationTimeUs`は実際には常に`System.nanoTime()`(CLOCK_MONOTONIC)ドメインで
+ * 返ってくる(REALTIMEソース機でも)。`sensorTimestampNanos − presentationTimeUs×1000`
+ * と`elapsedRealtimeNanos − nanoTime`(スリープ蓄積による約79591秒のギャップ)が
+ * 1.7μs差で一致したことで確認済み。旧実装はこのギャップを二重に引いてしまい、
+ * 較正後のPTSが常に大きく負になり0にクランプされ続け、結果的に最初の1フレーム
+ * 以外すべて「非単調」として破棄されるバグを引き起こしていた(録画中ずっとVideo
+ * フレームが1枚しかMuxerに書き込まれない、という形で実機録画テストで発覚)。
+ * これを受け、REALTIME/UNKNOWN分岐・較正機構を全廃し、`presentationTimeUs`を
+ * 単純に`recordingStartNanos`基準でゼロ点合わせするだけの実装に変更した——
+ * Audioパス([startAudioAnchorFromFrameCorrelation]、`getInputTimestamp()`が
+ * MONOTONICドメインと明記)と同じ基準系になるため、追加の較正なしに両トラックが
+ * 素の捕捉時刻ベースで同期する、より単純かつ正確な設計になった。
+ *
+ * **既知の限界**: この単純化は1台の実機での検証結果に基づく。`presentationTimeUs`を
+ * 生のHALセンサータイムスタンプのドメイン(CLOCK_BOOTTIME等)のまま素通しする
+ * 別機種・別Codec実装が理論上存在し得る場合、このクラスはそのズレを検出せず
+ * スリープ蓄積分だけ同期がずれる。Phase5で複数実機・複数ベンダーのCodecでの
+ * 検証が必要。
  */
 class PtsClockDomain(private val clock: Clock = SystemClockAdapter) {
 
     interface Clock {
         /** CLOCK_MONOTONIC — this class's chosen common reference domain for both tracks. */
         fun nanoTimeNanos(): Long
-
-        /** CLOCK_BOOTTIME — what SENSOR_TIMESTAMP equals under TIMESTAMP_SOURCE_REALTIME. */
-        fun elapsedRealtimeNanos(): Long
     }
 
     object SystemClockAdapter : Clock {
         override fun nanoTimeNanos(): Long = System.nanoTime()
-        override fun elapsedRealtimeNanos(): Long = android.os.SystemClock.elapsedRealtimeNanos()
     }
 
-    sealed interface TimestampSource {
-        /** SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME. */
-        data object Realtime : TimestampSource
-
-        /** SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN — needs the calibration below. */
-        data object Unknown : TimestampSource
-    }
-
-    companion object {
-        /** §4.3's concrete calibration proposal for the UNKNOWN clock source. */
-        const val UNKNOWN_CALIBRATION_SAMPLE_COUNT = 10
-    }
-
-    private var timestampSource: TimestampSource? = null
     private var recordingStartNanos: Long = 0L
-
-    // --- Realtime calibration: exact, single reading ---
-    // Derivation: elapsedRealtimeNanos(t) - nanoTimeNanos(t) is constant (call it C) for as
-    // long as the device never suspends (guaranteed during recording by the Foreground
-    // Service's WAKE_LOCK, §4.6). SENSOR_TIMESTAMP under REALTIME equals
-    // elapsedRealtimeNanos() at the actual hardware capture instant: s = E(t_frame).
-    // We want N(t_frame) (our common reference domain): N(t_frame) = E(t_frame) - C
-    // = s - C = s - (E0 - N0), where E0/N0 are a single back-to-back reading taken at
-    // calibration time. So: monotonicNanos = sensorTimestampNanos - realtimeOffsetNanos,
-    // with realtimeOffsetNanos = E0 - N0.
-    private var realtimeOffsetNanos: Long = 0L
-
-    // --- Unknown calibration: statistical, K-sample median (see class doc) ---
-    private val unknownCalibrationSamples = mutableListOf<Long>()
-    private var unknownOffsetNanos: Long? = null
 
     private var lastVideoPtsUs: Long = Long.MIN_VALUE
     private var audioAnchorNanos: Long = -1L
     private var lastAudioPtsUs: Long = Long.MIN_VALUE
 
     /** Call once, right when recording starts, before any PTS normalization. */
-    fun start(source: TimestampSource, nowNanos: Long = clock.nanoTimeNanos()) {
-        timestampSource = source
+    fun start(nowNanos: Long = clock.nanoTimeNanos()) {
         recordingStartNanos = nowNanos
-        unknownCalibrationSamples.clear()
-        unknownOffsetNanos = null
         lastVideoPtsUs = Long.MIN_VALUE
         lastAudioPtsUs = Long.MIN_VALUE
         audioAnchorNanos = -1L
-
-        if (source is TimestampSource.Realtime) {
-            val e0 = clock.elapsedRealtimeNanos()
-            val n0 = clock.nanoTimeNanos()
-            realtimeOffsetNanos = e0 - n0
-        }
     }
 
     /**
-     * UNKNOWN source only: feed one (sensorTimestamp, appArrivalTime) pair per frame from
-     * `CameraCaptureSession.CaptureCallback#onCaptureCompleted` until [isVideoCalibrated]
-     * becomes true (after [UNKNOWN_CALIBRATION_SAMPLE_COUNT] samples). No-op once
-     * calibrated, and no-op for the Realtime source (which needs no per-frame samples).
+     * Normalizes one video frame's encoder-reported presentation time (already
+     * CLOCK_MONOTONIC — see this class's doc) into an epoch-zeroed microsecond PTS
+     * suitable for MediaCodec. Returns null if the computed PTS would not be strictly
+     * greater than the last emitted one (the monotonic-increase guard from §4.3's last
+     * bullet).
      */
-    fun addUnknownCalibrationSample(sensorTimestampNanos: Long, arrivalNanoTime: Long = clock.nanoTimeNanos()) {
-        if (timestampSource !== TimestampSource.Unknown) return
-        if (unknownOffsetNanos != null) return
-        unknownCalibrationSamples += (arrivalNanoTime - sensorTimestampNanos)
-        if (unknownCalibrationSamples.size >= UNKNOWN_CALIBRATION_SAMPLE_COUNT) {
-            unknownOffsetNanos = median(unknownCalibrationSamples)
-        }
-    }
-
-    val isVideoCalibrated: Boolean
-        get() = when (timestampSource) {
-            TimestampSource.Realtime -> true
-            TimestampSource.Unknown -> unknownOffsetNanos != null
-            null -> false
-        }
-
-    /**
-     * Normalizes one video frame's SENSOR_TIMESTAMP into an epoch-zeroed microsecond PTS
-     * suitable for MediaCodec. Returns null if the frame must be dropped: either
-     * calibration isn't ready yet (UNKNOWN source, still collecting samples — frames
-     * arriving before that point are expected to be absorbed by the Muxer's pending-queue
-     * per §4.4, not lost) or the computed PTS would not be strictly greater than the last
-     * emitted one (the monotonic-increase guard from §4.3's last bullet).
-     */
-    fun normalizeVideoPtsUs(sensorTimestampNanos: Long): Long? {
-        val monotonicNanos = when (timestampSource) {
-            TimestampSource.Realtime -> sensorTimestampNanos - realtimeOffsetNanos
-            TimestampSource.Unknown -> {
-                val offset = unknownOffsetNanos ?: return null
-                sensorTimestampNanos + offset
-            }
-
-            null -> error("PtsClockDomain.start() must be called before normalizeVideoPtsUs()")
-        }
+    fun normalizeVideoPtsUs(presentationTimeNanos: Long): Long? {
         // A frame captured fractionally before start() (e.g. already in flight when
         // recording began) would otherwise map to a negative PTS, which MediaMuxer
         // rejects outright — clamp to the epoch boundary instead of emitting it raw.
-        val ptsUs = ((monotonicNanos - recordingStartNanos) / 1000L).coerceAtLeast(0L)
+        val ptsUs = ((presentationTimeNanos - recordingStartNanos) / 1000L).coerceAtLeast(0L)
         if (ptsUs <= lastVideoPtsUs) {
             return null
         }
@@ -173,15 +124,5 @@ class PtsClockDomain(private val clock: Clock = SystemClockAdapter) {
         }
         lastAudioPtsUs = ptsUs
         return ptsUs
-    }
-
-    private fun median(values: List<Long>): Long {
-        val sorted = values.sorted()
-        val mid = sorted.size / 2
-        return if (sorted.size % 2 == 0) {
-            (sorted[mid - 1] + sorted[mid]) / 2
-        } else {
-            sorted[mid]
-        }
     }
 }

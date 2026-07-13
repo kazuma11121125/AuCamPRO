@@ -42,7 +42,15 @@ android {
                 cmake {
                     // ASan/UBSan are debug-only per spec §4.6; see cpp/CMakeLists.txt
                     // for the actual sanitizer flag wiring (CMAKE_BUILD_TYPE=Debug gate).
-                    arguments += listOf("-DPROCAMERA_ENABLE_SANITIZERS=ON")
+                    //
+                    // Temporarily OFF for on-device debug APKs: ASan-instrumented .so
+                    // dlopen()-fails on a real device (UnsatisfiedLinkError: libclang_rt
+                    // .asan-aarch64-android.so not found) without a wrap.sh that packages
+                    // the sanitizer runtime and LD_PRELOADs it — see docs/ARCHITECTURE.md's
+                    // judgment log. Host GTest builds (app/src/main/cpp/test/CMakeLists.txt)
+                    // remain ASan/UBSan-instrumented and unaffected by this. Re-enable once
+                    // Phase4/5's wrap.sh task lands.
+                    arguments += listOf("-DPROCAMERA_ENABLE_SANITIZERS=OFF")
                 }
             }
         }
