@@ -200,10 +200,16 @@ class AudioEncoder(
         // enough to keep the AAC encoder's input latency low.
         const val FRAMES_PER_BLOCK = 512
 
-        // 50 attempts * 5ms = 250ms budget: comfortably above a live audio stream's
-        // typical first-callback latency, without stalling recording start noticeably
-        // if the native engine is slow to come up.
-        const val ANCHOR_CORRELATION_MAX_ATTEMPTS = 50
-        const val ANCHOR_CORRELATION_RETRY_SLEEP_MS = 5L
+        // 200 attempts * 10ms = 2000ms budget. A 250ms budget was empirically too short
+        // on real hardware (Sony SO-51C): AAudio's getTimestamp() reliably returned
+        // ErrorInvalidState until the input stream had processed several bursts' worth
+        // of frames, which took closer to 1s in practice — the 250ms budget was silently
+        // falling back to wall-clock anchoring on every real recording (see
+        // docs/ARCHITECTURE.md's judgment log), reintroducing the input-latency offset
+        // this mechanism exists to remove. 2s is a one-time recording-start cost, not a
+        // steady-state one, so it's an acceptable trade for reliably getting the accurate
+        // anchor.
+        const val ANCHOR_CORRELATION_MAX_ATTEMPTS = 200
+        const val ANCHOR_CORRELATION_RETRY_SLEEP_MS = 10L
     }
 }
