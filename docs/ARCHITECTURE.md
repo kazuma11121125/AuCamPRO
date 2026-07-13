@@ -20,6 +20,44 @@
 
 ---
 
+## Phase 2: C++レイヤー全実装(Oboe Engine / DSP / Lock-Free RingBuffer / JNI)
+
+このフェーズで出力したファイル一覧:
+
+- `app/src/main/cpp/common/Result.h`(`std::expected`代替の自前`Result<T,E>`)
+- `app/src/main/cpp/common/TripleBuffer.h`(EQ係数受け渡し用のWait-Free Triple Buffer)
+- `app/src/main/cpp/common/Log.h`
+- `app/src/main/cpp/buffer/SpscRingBuffer.h`(Lock-Free SPSC RingBuffer、cache-line整列・acquire/release根拠をコメント内に明記)
+- `app/src/main/cpp/dsp/BiquadEq.{h,cpp}`(RBJ Cookbook 3-band Peaking EQ、係数はUIスレッド計算・Triple Buffer経由でAudioスレッドへ、コールバック内は線形補間のみでクリックノイズ対策)
+- `app/src/main/cpp/dsp/SafetyLimiter.{h,cpp}`(Look-aheadなしソフトクリッパー、-1.0dBFS閾値)
+- `app/src/main/cpp/dsp/PeakRmsMeter.{h,cpp}`(Peak/RMS dBFS計算、Atomic pull方式)
+- `app/src/main/cpp/engine/OboeFullDuplexEngine.{h,cpp}`(Oboe Full-Duplexエンジン本体、SharingMode/InputPresetフォールバックラダー、デバイス切替、モニタリング制御)
+- `app/src/main/cpp/jni/native-lib.cpp`(実JNIバインディング一式)
+- `app/src/main/java/com/procamera/recorder/audio/NativeEngineBridge.kt`(実装済みKotlin側ラッパー)
+- `app/src/main/cpp/test/`(ホストビルド用GTestプロジェクト一式。§4.7で要求されるBiquad/Peak-RMS/RingBufferテストをPhase2内で前倒し実装)
+
+### ネイティブ単体テスト(ホストビルド、実機なしでの検証)
+
+命令書§4.7はGTestをPhase5の成果物としているが、advisorレビュー(Phase1完了時)の指摘どおり実機・エミュレータの無いこの環境では「ビルドが通る」ことと「正しく動く」ことの間に大きな乖離があるため、ロックフリー系コンポーネントとDSPのGTestをPhase2実装と同時に前倒しで整備した。
+
+実行方法:
+```
+cmake -S app/src/main/cpp/test -B build-host-test -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-host-test -j
+./build-host-test/procamera_native_tests
+```
+ASan/UBSanを既定で有効化(`PROCAMERA_TEST_SANITIZERS=ON`)。GoogleTest 1.17.0をFetchContentで取得。24テスト全てPASS(SpscRingBuffer/TripleBufferの実マルチスレッドストレステストを含む)。
+
+**このテストで実際にバグを1件検出・修正した**: `SafetyLimiter`のソフトクリッパーが`tanh()`のfloat32飽和により、大振幅入力で出力が厳密に1.0(0dBFS)へ到達してしまう不具合(`SafetyLimiterTest.SignalAboveThresholdIsCompressedNeverReachesFullScale`が検出)。閾値からの飽和先を1.0ではなく`0.999`(≈-0.0087dBFS)に変更して修正。「assembleDebugが通る」だけでは検出できなかった類のバグであり、GTestをPhase2に前倒しした判断の実証になった。
+
+### Phase2で追加した判断ログ
+
+11. **C++エラー処理の`expected`パターン**: `common/Result.h`に自前の`Result<T,E>`(`std::variant`ベース、非throwアクセサのみ使用)を実装し、`OboeFullDuplexEngine`のstream open/reopen/monitoring制御等で使用。
+12. **EQ係数の受け渡し方式**: 命令書は「Atomicなダブルバッファ」と表現しているが、素朴な2スロット構成には「Writerが短時間に2回連続publishすると、Readerが読んでいる最中のスロットを上書きしてしまう」書き込み競合(tearing)のリスクが実在する(UIスライダーの高速ドラッグ等で発生しうる)。これを構造的に排除する **Wait-Free Triple Buffer**(3スロット、CAS/リトライなし)を`common/TripleBuffer.h`に実装し、これを「ダブルバッファ概念の実用的な実装」として採用した。
+13. **SafetyLimiterのソフトクリップ飽和先**: 上記の通り、`tanh`のfloat32飽和により文字通り0dBFSに到達するバグをGTestで検出し、飽和先を`0.999`linear(閾値からの相対スケール)に変更して修正済み。
+
+---
+
 ## 採用バージョン一覧(2026-07-13 時点で実在確認済み)
 
 | 項目 | 採用値 | 確認方法 |
@@ -271,3 +309,5 @@ ProCamera/
 12. **ネイティブ単体テストの前倒し**: 命令書は Google Test を Phase5 の成果物としているが、実機・エミュレータが無いこの環境では **ホストビルドのGTest が唯一の実行可能な正しさの検証手段**(especiallyロックフリーRingBufferのマルチスレッドストレステスト、PTS単調増加ガード、Biquad周波数特性)である。そのためPhase2の実装と同時にGTestのホストビルド環境を先行して整備し、各コンポーネント実装直後に対応するテストを書いて実行する(Phase5では追加テストとCI組み込みのみを行う)。
 
 **矛盾・実現不可能な要求の有無**: 命令書自体が主要な既知の落とし穴(minSdk29と`getThermalHeadroom`のAPIレベル不整合、Float/16bit変換精度、UNKNOWNクロック較正の要求)を事前に自己解決する形で書かれており、Phase1着手時点で追加の承認が必要な技術的矛盾・実現不可能な要求は見つからなかった。上記1〜10は「粒度不足を埋めた判断」であり、矛盾の指摘とは別categoryである。
+
+**Phase2着手時に発見した矛盾(ユーザー承認済み)**: 命令書§0のフェーズ分割は PTS管理・Kelvin→RGGB変換を Phase3(Kotlinレイヤー)の範囲としているが、§4.7 はこれらを **Google Test(C++専用)** で検証するよう指定しており、実装言語の想定が矛盾していた。ユーザーに確認し、**PTS計算(単調増加ガード・UNKNOWNクロック較正含む)・Kelvin→RGGB変換は両方ともKotlinに実装し、JUnitで検証する**(§4.7の当該箇所はGTestではなくJUnit対象と読み替える)ことで解決した。Phase1のクラス構成(`PtsClockDomain`は`muxer/`、`ColorTemperatureConverter`は`camera/`、いずれもKotlin)は変更不要。

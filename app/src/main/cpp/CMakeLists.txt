@@ -10,11 +10,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # plain `cmake --build` without AGP-supplied args never accidentally ships sanitized code.
 option(PROCAMERA_ENABLE_SANITIZERS "Enable ASan+UBSan (debug builds only)" OFF)
 
-# Phase 2 populates engine/, dsp/, buffer/ with the Oboe engine, Biquad EQ, and the
-# lock-free SPSC ring buffer. Only the JNI entry point exists at Phase 1 to prove the
-# CMake + prefab(Oboe) toolchain builds end-to-end.
 add_library(procamera_native SHARED
     jni/native-lib.cpp
+    engine/OboeFullDuplexEngine.cpp
+    dsp/BiquadEq.cpp
+    dsp/SafetyLimiter.cpp
+    dsp/PeakRmsMeter.cpp
 )
 
 find_package(oboe REQUIRED CONFIG)
