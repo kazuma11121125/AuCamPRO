@@ -40,6 +40,7 @@ Result<std::shared_ptr<oboe::AudioStream>, std::string> OboeFullDuplexEngine::op
             ->setChannelCount(kChannelCount)
             ->setInputPreset(attempt.inputPreset)
             ->setFormatConversionAllowed(true)
+            ->setChannelConversionAllowed(true)
             ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
             ->setDataCallback(this)
             ->setErrorCallback(this);
@@ -68,6 +69,22 @@ Result<std::shared_ptr<oboe::AudioStream>, std::string> OboeFullDuplexEngine::op
             PROCAMERA_LOGW("Input stream InputPreset downgraded by OS to %d",
                             static_cast<int>(stream->getInputPreset()));
         }
+
+        // The entire DSP chain (EQ/limiter/meter) and the ring buffer's frame math
+        // hard-assume kChannelCount/kSampleRate interleaved float frames. setFormat/
+        // SampleRate/ChannelConversionAllowed(true) above ask Oboe to make that true
+        // regardless of the device's native config, but this has not been verified on a
+        // real device (§ "確信度の明示" — no hardware available in this environment), so
+        // fail loudly here rather than silently misinterpret e.g. a mono stream as
+        // interleaved stereo (which would corrupt every sample, not just degrade quality).
+        if (stream->getChannelCount() != kChannelCount || stream->getSampleRate() != kSampleRate) {
+            PROCAMERA_LOGE("Input stream opened with unexpected config: channels=%d rate=%d (expected %d/%d)",
+                            stream->getChannelCount(), stream->getSampleRate(), kChannelCount, kSampleRate);
+            stream->close();
+            return Result<std::shared_ptr<oboe::AudioStream>, std::string>::Err(
+                "Input stream channel/sample-rate conversion did not produce the expected format");
+        }
+
         return Result<std::shared_ptr<oboe::AudioStream>, std::string>::Ok(stream);
     }
 
@@ -96,17 +113,27 @@ Result<void, std::string> OboeFullDuplexEngine::start(int32_t preferredInputDevi
 
 void OboeFullDuplexEngine::stop() {
     std::lock_guard<std::mutex> lock(streamMutex_);
+    monitoringEnabled_.store(false, std::memory_order_relaxed);
+
+    // Input stream MUST close first: Oboe guarantees onAudioReady() cannot fire again
+    // once close() returns, which is what makes it safe to then close the output stream
+    // below without racing the passthrough write() a still-running callback might
+    // otherwise be issuing concurrently.
     if (inputStream_) {
         inputStream_->requestStop();
         inputStream_->close();
         inputStream_.reset();
     }
+
     if (outputStream_) {
+        // Clear the audio-thread-visible pointer before actually closing — by this point
+        // onAudioReady() can no longer be invoked at all (input stream already closed
+        // above), so this ordering is a defensive belt-and-suspenders, not load-bearing.
+        outputStreamRaw_.store(nullptr, std::memory_order_release);
         outputStream_->requestStop();
         outputStream_->close();
         outputStream_.reset();
     }
-    monitoringEnabled_.store(false, std::memory_order_relaxed);
 }
 
 Result<void, std::string> OboeFullDuplexEngine::reopenInputStream(int32_t deviceId) {
@@ -152,17 +179,15 @@ Result<void, std::string> OboeFullDuplexEngine::setMonitoringEnabled(bool enable
     std::lock_guard<std::mutex> lock(streamMutex_);
 
     if (!enabled) {
+        // Deliberately does NOT close the output stream — see the header comment on this
+        // method for why (the input callback may still be mid-write() on it).
         monitoringEnabled_.store(false, std::memory_order_relaxed);
-        if (outputStream_) {
-            outputStream_->requestStop();
-            outputStream_->close();
-            outputStream_.reset();
-        }
         return Result<void, std::string>::Ok();
     }
 
     if (outputStream_) {
-        // Already open (e.g. re-enabling); nothing further to do.
+        // Already open (e.g. re-enabling); nothing further to do. Note: does not support
+        // switching to a different outputDeviceId once open — see header comment.
         monitoringEnabled_.store(true, std::memory_order_relaxed);
         return Result<void, std::string>::Ok();
     }
@@ -176,6 +201,7 @@ Result<void, std::string> OboeFullDuplexEngine::setMonitoringEnabled(bool enable
         ->setChannelCount(kChannelCount)
         ->setUsage(oboe::Usage::Media)
         ->setFormatConversionAllowed(true)
+        ->setChannelConversionAllowed(true)
         ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium);
     if (outputDeviceId != oboe::kUnspecified) {
         builder.setDeviceId(outputDeviceId);
@@ -195,6 +221,10 @@ Result<void, std::string> OboeFullDuplexEngine::setMonitoringEnabled(bool enable
     }
 
     outputStream_ = stream;
+    // Published last, after the shared_ptr member and the stream is fully started, so
+    // the audio thread never observes a non-null raw pointer to a stream that isn't
+    // ready to accept write() calls yet.
+    outputStreamRaw_.store(stream.get(), std::memory_order_release);
     monitoringEnabled_.store(true, std::memory_order_relaxed);
     return Result<void, std::string>::Ok();
 }
@@ -232,12 +262,15 @@ oboe::DataCallbackResult OboeFullDuplexEngine::onAudioReady(oboe::AudioStream * 
         ringBufferOverrunCount_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    if (monitoringEnabled_.load(std::memory_order_relaxed) && outputStream_) {
-        // timeoutNanoseconds=0: never blocks, per §4.2's prohibition on blocking I/O in
-        // the audio callback. A short write is simply dropped (monitoring is
-        // best-effort; it must never be allowed to threaten the input callback's
-        // deadline or the encoder ring buffer's integrity).
-        outputStream_->write(samples, numFrames, 0);
+    if (monitoringEnabled_.load(std::memory_order_relaxed)) {
+        oboe::AudioStream *output = outputStreamRaw_.load(std::memory_order_acquire);
+        if (output != nullptr) {
+            // timeoutNanoseconds=0: never blocks, per §4.2's prohibition on blocking I/O
+            // in the audio callback. A short write is simply dropped (monitoring is
+            // best-effort; it must never be allowed to threaten the input callback's
+            // deadline or the encoder ring buffer's integrity).
+            output->write(samples, numFrames, 0);
+        }
     }
 
     return oboe::DataCallbackResult::Continue;

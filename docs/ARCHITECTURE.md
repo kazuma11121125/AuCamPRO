@@ -56,6 +56,12 @@ ASan/UBSanを既定で有効化(`PROCAMERA_TEST_SANITIZERS=ON`)。GoogleTest 1.1
 12. **EQ係数の受け渡し方式**: 命令書は「Atomicなダブルバッファ」と表現しているが、素朴な2スロット構成には「Writerが短時間に2回連続publishすると、Readerが読んでいる最中のスロットを上書きしてしまう」書き込み競合(tearing)のリスクが実在する(UIスライダーの高速ドラッグ等で発生しうる)。これを構造的に排除する **Wait-Free Triple Buffer**(3スロット、CAS/リトライなし)を`common/TripleBuffer.h`に実装し、これを「ダブルバッファ概念の実用的な実装」として採用した。
 13. **SafetyLimiterのソフトクリップ飽和先**: 上記の通り、`tanh`のfloat32飽和により文字通り0dBFSに到達するバグをGTestで検出し、飽和先を`0.999`linear(閾値からの相対スケール)に変更して修正済み。
 
+### advisorレビューで検出・修正した3件(Phase2完了前)
+
+1. **`outputStream_`のデータ競合**: Audioコールバックスレッド(`onAudioReady`)がモニタ出力用`shared_ptr`を読み、UIスレッド(`setMonitoringEnabled`/`stop`)が再代入する構成は、`shared_ptr`のコントロールブロックに対する未定義動作のデータ競合だった。`std::atomic<std::shared_ptr<T>>`(C++23的な教科書解)を試したが、**NDK r27dのlibc++はこの特殊化を実装しておらず、`is_trivially_copyable`の static_assert で実際にコンパイルエラーになることを実機トールチェーンで確認**(推測で採用せず、実際にコンパイルして検証)。代わりに、所有権(RAII)はUIスレッド専有の`shared_ptr`に残し、Audioスレッドが読むのは真にlock-freeな`std::atomic<oboe::AudioStream*>`(生ポインタ)のみとする設計に変更。安全性の根拠はポインタのatomic性そのものではなく、「Inputストリームを閉じてから(コールバックが二度と呼ばれないことをOboeが保証してから)でないとOutputストリームを閉じない」という`stop()`の順序不変条件、および`setMonitoringEnabled(false)`は実際にはストリームを閉じずAtomicフラグを倒すだけにする、という設計変更で担保している(詳細は`OboeFullDuplexEngine.h`のコメント参照)。
+2. **EQランプが目標値に到達しない**: `t = 1 - remaining/kRampSamples`という補間式は`remaining=1`の時点で`t≈0.9958`にしかならず、ランプ完了時に`currentCoeffs_`が目標値へ厳密に一致しない(恒久的に約0.4%不足)バグがあった。`rampSamplesRemaining_`が0になった瞬間に`currentCoeffs_ = rampTarget_`へスナップする処理を追加して修正。既存のGTestは`ThreeBandEq`のランプ経路自体を通っていなかったため検出できておらず、`setBandParams`→ランプ収束→測定という経路を実際に駆動する新規テスト(`RampConvergesExactlyToRequestedGainAfterSettling`)を追加した。
+3. **チャンネル数/サンプルレートの実機不一致リスク**: 内蔵マイクが実際にはモノラルでオープンされる可能性があるにも関わらず、DSPチェーン・RingBufferのフレーム計算は全てステレオ前提だった。`setChannelConversionAllowed(true)`をInput/Output両ストリームに追加してOboeに変換を要求しつつ、オープン後に`getChannelCount()`/`getSampleRate()`を検証し、期待値と一致しない場合はストリームを閉じてエラーを返すガードを追加(実機なしでは変換が実際に機能するか断定できないため、無言の破損より明示的な失敗を選択)。
+
 ---
 
 ## 採用バージョン一覧(2026-07-13 時点で実在確認済み)

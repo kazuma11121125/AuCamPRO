@@ -61,6 +61,16 @@ public:
     // trusts that decision and does not re-derive it; passing enabled=true while routed
     // to the built-in speaker would violate the anti-howling requirement, so callers must
     // gate this correctly before calling.
+    //
+    // enabled=false only flips the atomic flag onAudioReady() checks — it deliberately
+    // does NOT close the output stream, because that stream may be concurrently
+    // dereferenced by the (still-running) input callback for its passthrough write, and
+    // Oboe streams are not documented as safe against write() on one thread racing
+    // close() on another. The output stream is only actually closed in stop(), which
+    // closes the input stream first — guaranteeing onAudioReady() cannot fire again —
+    // before it is safe to close the output stream too. A practical consequence: once
+    // opened, a monitor output stream stays open (idle when disabled) for the rest of the
+    // recording session rather than being torn down and reopened on every toggle.
     Result<void, std::string> setMonitoringEnabled(bool enabled, int32_t outputDeviceId);
 
     // UI/coroutine thread only.
@@ -92,8 +102,27 @@ private:
 
     // Guards stream open/close/reopen sequencing; never held during onAudioReady().
     std::mutex streamMutex_;
+    // Only ever touched from UI-thread methods under streamMutex_; onAudioReady() reads
+    // its `stream` parameter from Oboe directly and never dereferences this field.
     std::shared_ptr<oboe::AudioStream> inputStream_;
+
+    // outputStream_ is read from onAudioReady() (the passthrough write), concurrently
+    // with UI-thread writes from setMonitoringEnabled()/stop(). A plain shared_ptr here
+    // would be a data race on the control block itself (UB) when one side reassigns
+    // while the other dereferences. std::atomic<std::shared_ptr<T>> (C++20) would be the
+    // textbook fix, but NDK r27d's libc++ does not implement that specialization —
+    // verified empirically: instantiating it fails the library's own
+    // is_trivially_copyable static_assert, i.e. it silently falls through to the
+    // generic primary template instead of a real lock-free/spinlock shared_ptr
+    // specialization. So instead: outputStream_ (shared_ptr) is UI-thread-only and owns
+    // the object's lifetime (RAII); outputStreamRaw_ is a plain
+    // std::atomic<oboe::AudioStream*> (a raw pointer is trivially copyable, so this *is*
+    // genuinely lock-free on arm64/x86_64) that the audio thread reads. Safety does not
+    // come from the atomic alone — it comes from the invariant that the pointee is never
+    // destroyed while the input stream (and therefore onAudioReady()) might still be
+    // running; see stop() and setMonitoringEnabled() for how that invariant is upheld.
     std::shared_ptr<oboe::AudioStream> outputStream_;
+    std::atomic<oboe::AudioStream *> outputStreamRaw_{nullptr};
 
     std::atomic<bool> monitoringEnabled_{false};
     std::atomic<int32_t> ringBufferOverrunCount_{0};

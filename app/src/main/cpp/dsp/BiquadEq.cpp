@@ -82,11 +82,19 @@ void ThreeBandEq::process(float *interleaved, size_t frameCount) {
 
     for (size_t frame = 0; frame < frameCount; ++frame) {
         if (rampSamplesRemaining_ > 0) {
-            const float t = 1.0f - static_cast<float>(rampSamplesRemaining_) / static_cast<float>(kRampSamples);
-            for (int band = 0; band < kNumBands; ++band) {
-                currentCoeffs_.bands[band] = lerp(rampStart_.bands[band], rampTarget_.bands[band], t);
-            }
             --rampSamplesRemaining_;
+            if (rampSamplesRemaining_ == 0) {
+                // Snap exactly to the target on the final ramp sample. The interpolated
+                // t = 1 - remaining/kRampSamples formula never actually reaches 1.0 (its
+                // last nonzero-remaining value is 1 - 1/kRampSamples), so without this the
+                // filter would settle ~0.4% short of the requested response forever.
+                currentCoeffs_ = rampTarget_;
+            } else {
+                const float t = 1.0f - static_cast<float>(rampSamplesRemaining_) / static_cast<float>(kRampSamples);
+                for (int band = 0; band < kNumBands; ++band) {
+                    currentCoeffs_.bands[band] = lerp(rampStart_.bands[band], rampTarget_.bands[band], t);
+                }
+            }
         }
 
         for (int ch = 0; ch < channelCount_; ++ch) {
