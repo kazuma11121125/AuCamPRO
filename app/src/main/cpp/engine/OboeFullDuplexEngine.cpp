@@ -1,5 +1,6 @@
 #include "engine/OboeFullDuplexEngine.h"
 
+#include <ctime>
 #include <vector>
 
 #include "common/Log.h"
@@ -239,6 +240,19 @@ int32_t OboeFullDuplexEngine::hardwareXRunCount() const {
     }
     oboe::ResultWithValue<int32_t> result = inputStream_->getXRunCount();
     return result ? result.value() : 0;
+}
+
+bool OboeFullDuplexEngine::getInputTimestamp(int64_t *outFramePosition, int64_t *outTimeNanos) const {
+    if (!inputStream_) {
+        return false;
+    }
+    oboe::ResultWithValue<oboe::FrameTimestamp> result = inputStream_->getTimestamp(CLOCK_MONOTONIC);
+    if (!result) {
+        return false;
+    }
+    *outFramePosition = result.value().position;
+    *outTimeNanos = result.value().timestamp;
+    return true;
 }
 
 size_t OboeFullDuplexEngine::drainEncoderBuffer(float *dst, size_t maxFrames) {

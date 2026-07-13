@@ -64,6 +64,24 @@ ASan/UBSanを既定で有効化(`PROCAMERA_TEST_SANITIZERS=ON`)。GoogleTest 1.1
 
 ---
 
+## Phase 3: Kotlinレイヤー前半(Camera2 / Encoder / Muxer / PTS)
+
+### PtsClockDomain(§4.3, muxer/PtsClockDomain.kt)
+
+Phase1で確定した設計(REALTIME=単発較正、UNKNOWN=K=10サンプル中央値較正、両者ともエポック0=録画開始・単調増加ガード)をそのままKotlinで実装。JUnit 11ケースで以下を検証済み: REALTIME較正の正確性(BOOTTIME⇔MONOTONICギャップの相殺含む)、UNKNOWN較正の中央値による外れ値耐性、単調増加ガード(Video/Audio双方)、Audio PTSがサンプル数のみに基づき壁時計の変動に影響されないこと。
+
+advisorレビューで2件追加修正:
+- **Audioアンカーの精度**: 最初のOboeコールバックの壁時計到着時刻でアンカーすると、実際のキャプチャ時刻との間に入力パイプライン遅延(実機で数十ms)分の**定数オフセット**が生じ、ドリフトフリーであることとは無関係に§4.3のA/V同期予算(±20ms)を初手から消費してしまう問題を指摘された。`OboeFullDuplexEngine::getInputTimestamp()`(`AudioStream::getTimestamp(CLOCK_MONOTONIC)`のラップ、Audioコールバックスレッドからは呼ばない)をJNI経由で公開し、`PtsClockDomain.startAudioAnchorFromFrameCorrelation(framePosition, timeNanos, sampleRateHz)`でサンプル0の真のキャプチャ時刻を逆算してアンカーする経路を追加。実機なしでは較正の実効精度を検証できないため、**Phase5の実機検証項目として明記**する。
+- **負PTSガード**: `start()`直前にキャプチャされたフレームが負のPTSに正規化されMediaMuxerに拒否される可能性があったため、Video/Audio双方で`coerceAtLeast(0L)`によるクランプを追加。
+
+### ColorTemperatureConverter(§4.1, camera/ColorTemperatureConverter.kt)
+
+Tanner Hellandの黒体放射近似式でKelvin→RGB変換し、補正ゲイン(逆比)を計算後、**最小チャンネルが1.0になるよう正規化**(緑固定ではなく)。advisorレビューで、緑を1.0に固定する素朴な正規化だと range端(2500K/8000Kそれぞれ)で赤または青のゲインが1.0未満になり、`COLOR_CORRECTION_GAINS`の一般的な規約(全チャンネル≥1.0、最強チャンネルが1.0基準)に反する可能性を指摘された。最小チャンネル基準への変更は相対比を保ったままの再スケーリングであり、色補正の方向性(暖色→青ブースト、寒色→赤ブースト)は変わらないことをテストで確認済み。JUnit 7ケース、全て2500〜8000Kの範囲で全チャンネル≥1.0を検証。
+
+**確信度の明示**: この近似式はCIE標準観測者から厳密に導出されたものではなく、実機での色再現(センサーのカラーフィルタ特性・ISPのレンダリング意図)は端末依存であり、Phase5の実機検証(グレーカード等の目視確認)なしには色精度を断定できない。
+
+---
+
 ## 採用バージョン一覧(2026-07-13 時点で実在確認済み)
 
 | 項目 | 採用値 | 確認方法 |

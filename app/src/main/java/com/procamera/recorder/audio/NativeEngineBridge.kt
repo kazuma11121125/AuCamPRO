@@ -38,6 +38,21 @@ class NativeEngineBridge : AutoCloseable {
 
     fun hardwareXRunCount(): Int = nativeHardwareXRunCount(handle)
 
+    /**
+     * One-shot (framePosition, timeNanos) correlation at CLOCK_MONOTONIC, used to seed
+     * [com.procamera.recorder.muxer.PtsClockDomain]'s audio anchor with the audio
+     * pipeline's true capture-time basis rather than a callback's wall-clock arrival time
+     * (see the native-side doc comment for why that distinction matters for §4.3's A/V
+     * sync budget). Returns null if not yet available (e.g. queried too soon after
+     * [start]) — callers should retry rather than fall back silently, since falling back
+     * to callback-arrival-time anchoring reintroduces the input-latency offset this exists
+     * to avoid.
+     */
+    fun getInputTimestamp(): Pair<Long, Long>? {
+        val raw = nativeGetInputTimestamp(handle) ?: return null
+        return raw[0] to raw[1]
+    }
+
     /** Drains up to [maxFrames] stereo frames into [dst] (must be sized >= maxFrames*2). */
     fun drainEncoderBuffer(dst: FloatArray, maxFrames: Int): Int = nativeDrainEncoderBuffer(handle, dst, maxFrames)
 
@@ -69,5 +84,6 @@ class NativeEngineBridge : AutoCloseable {
     private external fun nativeRmsDb(handle: Long): Float
     private external fun nativeRingBufferOverrunCount(handle: Long): Int
     private external fun nativeHardwareXRunCount(handle: Long): Int
+    private external fun nativeGetInputTimestamp(handle: Long): LongArray?
     private external fun nativeDrainEncoderBuffer(handle: Long, dst: FloatArray, maxFrames: Int): Int
 }

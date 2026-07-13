@@ -82,6 +82,18 @@ public:
     int32_t ringBufferOverrunCount() const { return ringBufferOverrunCount_.load(std::memory_order_relaxed); }
     int32_t hardwareXRunCount() const;
 
+    // UI/coroutine thread only — NOT the audio callback thread (Oboe's own docs advise
+    // against calling getTimestamp() from onAudioReady, and it isn't needed there: this
+    // exists to seed Kotlin's PtsClockDomain audio anchor once, shortly after start(),
+    // not to be polled per callback). Correlates a frame position to a true CLOCK_MONOTONIC
+    // capture time, which Kotlin uses to back-calculate the true capture time of sample 0
+    // (anchorNanos = timeNanos - framePosition * 1e9 / sampleRate) — this avoids anchoring
+    // to the wall-clock arrival time of the first callback, which would be offset from the
+    // true capture time by the audio pipeline's input latency (§4.3's A/V sync budget is
+    // tight enough that this offset matters; see docs/ARCHITECTURE.md). Returns false if
+    // the platform/stream doesn't support it yet (e.g. queried too soon after start()).
+    bool getInputTimestamp(int64_t *outFramePosition, int64_t *outTimeNanos) const;
+
     // Audio Encoder thread only. Drains up to maxFrames frames (interleaved stereo) from
     // the ring buffer; returns the number of frames actually read.
     size_t drainEncoderBuffer(float *dst, size_t maxFrames);

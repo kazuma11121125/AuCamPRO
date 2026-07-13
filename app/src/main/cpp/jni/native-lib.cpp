@@ -99,6 +99,22 @@ JNIEXPORT jint JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nati
     return toEngine(handle)->hardwareXRunCount();
 }
 
+// Returns [framePosition, timeNanos] (CLOCK_MONOTONIC), or null if unavailable. See
+// OboeFullDuplexEngine::getInputTimestamp for why this exists (a one-shot audio PTS
+// anchor correlation, not a per-callback query).
+JNIEXPORT jlongArray JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nativeGetInputTimestamp(
+    JNIEnv *env, jobject, jlong handle) {
+    int64_t framePosition = 0;
+    int64_t timeNanos = 0;
+    if (!toEngine(handle)->getInputTimestamp(&framePosition, &timeNanos)) {
+        return nullptr;
+    }
+    jlongArray result = env->NewLongArray(2);
+    const jlong values[2] = {static_cast<jlong>(framePosition), static_cast<jlong>(timeNanos)};
+    env->SetLongArrayRegion(result, 0, 2, values);
+    return result;
+}
+
 // Drains up to maxFrames stereo frames into dst (must be sized >= maxFrames * 2).
 // Returns the number of frames actually read.
 JNIEXPORT jint JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nativeDrainEncoderBuffer(
