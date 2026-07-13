@@ -3,6 +3,7 @@ package com.procamera.recorder.encoder
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.util.Log
 import com.procamera.recorder.audio.NativeEngineBridge
 import com.procamera.recorder.muxer.PtsClockDomain
 import java.util.concurrent.atomic.AtomicBoolean
@@ -48,15 +49,39 @@ class AudioEncoder(
     }
 
     /**
-     * Starts the encoder and the drain thread. Callers should seed [ptsClockDomain]'s
-     * audio anchor (preferably via `startAudioAnchorFromFrameCorrelation` — see
-     * PtsClockDomain's doc for why that's preferred over a raw `startAudioAnchor()` call)
-     * before or immediately after calling this.
+     * Starts the encoder and the drain thread. Seeds [ptsClockDomain]'s audio anchor via
+     * [PtsClockDomain.startAudioAnchorFromFrameCorrelation] itself (retrying against
+     * [NativeEngineBridge.getInputTimestamp] — see its doc for why a raw
+     * `startAudioAnchor()` call must not be substituted here, since that would silently
+     * reintroduce the input-latency offset the frame-correlation path exists to remove).
+     * Callers must ensure [nativeEngine] is already started (audio callbacks flowing)
+     * before calling this, so a correlation becomes available within the retry budget.
      */
     fun start() {
         codec.start()
+        seedAudioAnchor()
         running.set(true)
         drainThread = thread(name = "AudioEncoderDrain", priority = Thread.NORM_PRIORITY) { drainLoop() }
+    }
+
+    private fun seedAudioAnchor() {
+        repeat(ANCHOR_CORRELATION_MAX_ATTEMPTS) {
+            val correlation = nativeEngine.getInputTimestamp()
+            if (correlation != null) {
+                val (framePosition, timeNanos) = correlation
+                ptsClockDomain.startAudioAnchorFromFrameCorrelation(framePosition, timeNanos, sampleRateHz)
+                return
+            }
+            Thread.sleep(ANCHOR_CORRELATION_RETRY_SLEEP_MS)
+        }
+        // Correlation never became available within the retry budget (e.g. the native
+        // engine hasn't produced its first input callback yet) — fall back to wall-clock
+        // anchoring so recording doesn't hard-fail, at the cost of reintroducing the
+        // input-latency offset (see PtsClockDomain.startAudioAnchor's doc).
+        Log.w(TAG, "getInputTimestamp() never returned a correlation after " +
+            "$ANCHOR_CORRELATION_MAX_ATTEMPTS attempts; falling back to wall-clock audio anchor " +
+            "(A/V sync may be off by the audio input pipeline's latency)")
+        ptsClockDomain.startAudioAnchor()
     }
 
     /** Signals end-of-stream and waits for the drain thread to finish (§4.4's stop sequence). */
@@ -165,6 +190,7 @@ class AudioEncoder(
     }
 
     private companion object {
+        const val TAG = "AudioEncoder"
         const val DEQUEUE_TIMEOUT_US = 10_000L
         const val BUFFER_EMPTY_SLEEP_MS = 2L
         const val DRAIN_THREAD_JOIN_TIMEOUT_MS = 3_000L
@@ -173,5 +199,11 @@ class AudioEncoder(
         // capacity headroom (OboeFullDuplexEngine::kRingBufferCapacityFrames) and small
         // enough to keep the AAC encoder's input latency low.
         const val FRAMES_PER_BLOCK = 512
+
+        // 50 attempts * 5ms = 250ms budget: comfortably above a live audio stream's
+        // typical first-callback latency, without stalling recording start noticeably
+        // if the native engine is slow to come up.
+        const val ANCHOR_CORRELATION_MAX_ATTEMPTS = 50
+        const val ANCHOR_CORRELATION_RETRY_SLEEP_MS = 5L
     }
 }

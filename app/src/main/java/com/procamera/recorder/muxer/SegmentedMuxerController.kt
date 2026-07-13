@@ -96,8 +96,8 @@ class SegmentedMuxerController(
             return@synchronized
         }
 
-        // A rotation is mid-flight: route strictly by comparing this sample's PTS to the
-        // boundary — a straggler from before the boundary (the other track's thread
+        // A rotation may be mid-flight: route via MuxerSampleRouter, which encodes the
+        // straggler rule — a sample from before the boundary (the other track's thread
         // hadn't caught up yet when the video thread triggered rotation) MUST go to the
         // old muxer, never the new one, or that segment's audio/video would gain samples
         // that belong to the previous file.
@@ -133,7 +133,13 @@ class SegmentedMuxerController(
 
     /** Only valid while [rotationBoundaryPtsUs] is non-null (a rotation is mid-flight). */
     private fun routeDuringRotation(isVideo: Boolean, buffer: ByteBuffer, bufferInfo: MediaCodec.BufferInfo, boundaryPtsUs: Long) {
-        if (bufferInfo.presentationTimeUs < boundaryPtsUs && oldMuxer != null) {
+        val route = MuxerSampleRouter.decide(
+            started = true,
+            boundaryPtsUs = boundaryPtsUs,
+            samplePtsUs = bufferInfo.presentationTimeUs,
+            oldMuxerAvailable = oldMuxer != null,
+        )
+        if (route == MuxerSampleRouter.Route.OLD) {
             writeToOld(isVideo, buffer, bufferInfo)
         } else {
             routeToNew(isVideo, buffer, bufferInfo)
