@@ -33,6 +33,19 @@ import java.nio.ByteBuffer
 class SegmentedMuxerController(
     private val outputPathForSegment: (segmentIndex: Int) -> String,
     segmentDurationUs: Long = DEFAULT_SEGMENT_DURATION_US,
+    /**
+     * MP4 rotation matrix hint (0/90/180/270), applied to every segment's [MediaMuxer] via
+     * [MediaMuxer.setOrientationHint] before `start()`. This app's window is locked to
+     * `sensorLandscape` (real-device feedback: the UI itself should stay landscape-only),
+     * but the camera's encoded frames are always in the sensor's fixed native orientation
+     * regardless of how the user physically holds the phone — so a portrait-held
+     * recording needs this container-level tag for players to display it upright, since
+     * nothing about the actual pixel data changes. Sampled once at recording start (see
+     * `RecordingPipeline.startRecording`'s call site) rather than re-evaluated per
+     * segment — matching ordinary camera app behavior, where rotating the phone mid-take
+     * doesn't retroactively change already-committed segments' orientation tag.
+     */
+    private val orientationHintDegrees: Int = 0,
 ) {
     private data class PendingSample(
         val isVideo: Boolean,
@@ -76,6 +89,7 @@ class SegmentedMuxerController(
         val af = audioFormat ?: return
 
         val muxer = MediaMuxer(outputPathForSegment(0), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        muxer.setOrientationHint(orientationHintDegrees)
         currentVideoTrack = muxer.addTrack(vf)
         currentAudioTrack = muxer.addTrack(af)
         muxer.start()
@@ -163,6 +177,7 @@ class SegmentedMuxerController(
 
     private fun rotate(boundaryPtsUs: Long, newSegmentIndex: Int) {
         val next = MediaMuxer(outputPathForSegment(newSegmentIndex), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        next.setOrientationHint(orientationHintDegrees)
         val nextVideoTrack = next.addTrack(requireNotNull(videoFormat))
         val nextAudioTrack = next.addTrack(requireNotNull(audioFormat))
         next.start()

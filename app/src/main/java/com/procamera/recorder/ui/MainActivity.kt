@@ -56,6 +56,9 @@ class MainActivity : ComponentActivity() {
     // somewhere to dispatch to without threading a reference through the Compose tree.
     private val viewModel: CameraControlViewModel by viewModels()
 
+    // See dispatchKeyEvent's doc — debounces rapid repeated camera-key presses.
+    private var lastCameraKeyAcceptedAtMs = 0L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -83,16 +86,38 @@ class MainActivity : ComponentActivity() {
      * handling — none of the current UI needs `KEYCODE_CAMERA` for anything else, so there
      * is nothing to conflict with. `repeatCount == 0` guards against a held key re-firing
      * on every auto-repeat tick.
+     *
+     * **実機で発見・修正**: rapid repeated presses (tested via `adb shell input keyevent
+     * KEYCODE_CAMERA` a few times in under 2s each) reproduced a hard app crash —
+     * `ForegroundServiceDidNotStartInTimeException`. [CameraControlViewModel]'s recording
+     * state machine already no-ops a toggle that arrives mid-transition (see
+     * [CameraControlViewModel.startRecording]/[CameraControlViewModel.stopRecording]'s own
+     * guards), but that only protects against *overlapping* start/stop calls — it doesn't
+     * stop a *new* start from firing the instant the *previous* attempt's failure cleanup
+     * (`stopRecordingService()`) has just barely finished, which real-hardware testing
+     * showed is fast enough to race a fresh `startForegroundService()` call against the
+     * OS's own bookkeeping for the *previous* one, confusing whether `startForeground()`
+     * was called in time for the new one. A flat minimum interval between *accepted*
+     * presses sidesteps the race entirely rather than chasing its exact timing — no real
+     * user's shutter-button presses are anywhere near this close together.
      */
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
         if (event.keyCode == android.view.KeyEvent.KEYCODE_CAMERA &&
             event.action == android.view.KeyEvent.ACTION_DOWN &&
             event.repeatCount == 0
         ) {
-            viewModel.toggleRecording()
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastCameraKeyAcceptedAtMs >= CAMERA_KEY_DEBOUNCE_MS) {
+                lastCameraKeyAcceptedAtMs = now
+                viewModel.toggleRecording()
+            }
             return true
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    private companion object {
+        const val CAMERA_KEY_DEBOUNCE_MS = 1500L
     }
 }
 

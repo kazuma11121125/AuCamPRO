@@ -240,11 +240,26 @@ class CameraCapabilityInspector(private val cameraManager: CameraManager) {
      * This is the source of truth for the lens-switcher strip: the UI renders one button
      * per element, highlights [AvailableLens.isStandardLens], and uses
      * [AvailableLens.zoomLabel] as the button label.
+     *
+     * **実機で発見・修正(2026-07-14)**: Sony Photo Pro(実機に同梱の純正アプリ、
+     * `com.sonymobile.photopro`)と並べて比較したところ、Photo Proのレンズピッカーは
+     * 「16mm・24mm・85-125mm」の3つのみを表示するのに対し、このメソッドは4つ
+     * (「16mm・23mm・24mm・88mm」)を返していた。
+     *
+     * 最初に試した修正(`REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA`を持つ
+     * カメラの`getPhysicalCameraIds()`に含まれるIDを丸ごと除外)は実機で1枚
+     * (「24mm」のみ)にまで減ってしまい過剰だった — この端末では16mm/88mmの物理レンズ
+     * も何らかの論理マルチカメラの構成要素として現れるらしく、「論理カメラの構成要素は
+     * 全部隠す」という判定基準では本来見せるべき独立したレンズまで消えてしまう。
+     * 実際に排除すべきは「23mm」が「24mm」とほぼ同じ焦点距離の**重複**エントリだった
+     * という点だけなので、[dedupeByFocalLengthCluster]で焦点距離が近い
+     * ([FOCAL_LENGTH_DEDUPE_TOLERANCE_MM]以内)エントリをまとめ、各クラスタから
+     * 標準レンズ(あれば)を代表として1つだけ残す方式に変更した。
      */
     fun allRearLenses(): List<AvailableLens> {
         val standardCameraId = findStandardRearLens()?.cameraId
 
-        return cameraManager.cameraIdList.mapNotNull { id ->
+        val allCandidates = cameraManager.cameraIdList.mapNotNull { id ->
             val characteristics = cameraManager.getCameraCharacteristics(id)
             val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
             if (facing != CameraCharacteristics.LENS_FACING_BACK) return@mapNotNull null
@@ -273,6 +288,34 @@ class CameraCapabilityInspector(private val cameraManager: CameraManager) {
                 sensorDiagonalMm = sensorDiagonalMm,
             )
         }.sortedBy { it.equivalentFocalLengthMm }
+
+        return dedupeByFocalLengthCluster(allCandidates)
+    }
+
+    /**
+     * Collapses lenses whose 35mm-equivalent focal lengths are within
+     * [FOCAL_LENGTH_DEDUPE_TOLERANCE_MM] of each other into a single entry — see
+     * [allRearLenses]'s doc for why. [candidates] must already be sorted ascending by
+     * [AvailableLens.equivalentFocalLengthMm]. Within a cluster, the standard lens is kept
+     * if present (it's the one the rest of the app treats as the default/fallback), else
+     * the first (arbitrary but deterministic).
+     */
+    private fun dedupeByFocalLengthCluster(candidates: List<AvailableLens>): List<AvailableLens> {
+        val result = mutableListOf<AvailableLens>()
+        var clusterStart = 0
+        while (clusterStart < candidates.size) {
+            var clusterEnd = clusterStart
+            while (clusterEnd + 1 < candidates.size &&
+                candidates[clusterEnd + 1].equivalentFocalLengthMm - candidates[clusterStart].equivalentFocalLengthMm
+                <= FOCAL_LENGTH_DEDUPE_TOLERANCE_MM
+            ) {
+                clusterEnd++
+            }
+            val cluster = candidates.subList(clusterStart, clusterEnd + 1)
+            result += cluster.firstOrNull { it.isStandardLens } ?: cluster.first()
+            clusterStart = clusterEnd + 1
+        }
+        return result
     }
 
     /**
@@ -296,7 +339,19 @@ class CameraCapabilityInspector(private val cameraManager: CameraManager) {
     fun supportedVideoConfigs(cameraId: String): List<VideoConfigCandidate> {
         val allCandidates = listOf(
             VideoConfigCandidate(MediaFormat.MIMETYPE_VIDEO_HEVC, 3840, 2160, 30, 50_000_000), // 16:9
-            VideoConfigCandidate(MediaFormat.MIMETYPE_VIDEO_HEVC, 3840, 2880, 30, 50_000_000), // 4:3
+            // 3840x2880 (4:3 4K) intentionally NOT offered: **実機で発見(2026-07-14)** —
+            // this device (Sony SO-51C) rejects the Camera2 session outright
+            // (CameraCaptureSession.StateCallback#onConfigureFailed, "Unsupported set of
+            // inputs/outputs provided") when this is paired with the fixed 16:9 1920x1080
+            // preview buffer (see PreviewSurfaceView's doc for why that buffer is fixed).
+            // Its total pixel count (11.06MP) also exceeds the 16:9 4K option's (8.29MP),
+            // so supportedVideoConfigs()'s descending-pixel-count sort put it FIRST — every
+            // fresh install/preference-reset silently defaulted to a resolution that can
+            // never actually record. Root cause traced via `dumpsys`/logcat on-device, not
+            // reproducible from a host build. The smaller non-16:9 options below (21:9,
+            // 4:3, 1:1) have not hit the same failure in testing so far, but haven't been
+            // exhaustively re-verified against the now-fixed preview buffer either —
+            // Phase5 real-device coverage should specifically re-check each one.
             VideoConfigCandidate(MediaFormat.MIMETYPE_VIDEO_AVC,  2560, 1080, 30, 20_000_000), // 21:9
             VideoConfigCandidate(MediaFormat.MIMETYPE_VIDEO_AVC,  1920, 1080, 60, 20_000_000), // 16:9
             VideoConfigCandidate(MediaFormat.MIMETYPE_VIDEO_AVC,  1920, 1080, 30, 10_000_000), // 16:9
@@ -346,6 +401,13 @@ class CameraCapabilityInspector(private val cameraManager: CameraManager) {
     private companion object {
         const val FULL_FRAME_DIAGONAL_MM = 43.27f
         const val NORMAL_LENS_EQUIVALENT_MM = 28f // typical rear "main" lens equivalent on phones
+
+        // See allRearLenses()/dedupeByFocalLengthCluster's doc: real-device duplicate was
+        // "23mm" vs "24mm" (1mm apart) for what Sony's own Photo Pro treats as one lens.
+        // 3mm comfortably merges that without risking merging genuinely distinct lenses,
+        // which on every real multi-lens phone checked so far are spaced much further apart
+        // (e.g. 16mm ultra-wide vs 24mm main is an 8mm gap).
+        const val FOCAL_LENGTH_DEDUPE_TOLERANCE_MM = 3f
 
         // A real 1/2.3" compact-camera sensor (common "small sensor" reference point) has
         // a ~7.7mm diagonal; this is set well below that specifically to exclude the tiny

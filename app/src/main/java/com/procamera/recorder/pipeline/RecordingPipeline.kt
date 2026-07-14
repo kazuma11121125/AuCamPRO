@@ -101,6 +101,11 @@ class RecordingPipeline(private val context: Context) {
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val capabilityInspector = CameraCapabilityInspector(cameraManager)
     private val sessionController = CameraSessionController(cameraManager)
+    // See DeviceOrientationTracker's doc — supports recording upright even when physically
+    // held in portrait, despite this app's window being locked to sensorLandscape. Started
+    // eagerly (not just while recording) so the first recording of a session already has a
+    // fresh reading rather than needing to wait out OrientationEventListener's own warm-up.
+    private val orientationTracker = com.procamera.recorder.utils.DeviceOrientationTracker(context).apply { start() }
 
     /**
      * Guards every `sessionController.stop()` + `startRepeating()` pair (session
@@ -153,6 +158,11 @@ class RecordingPipeline(private val context: Context) {
     private var requestFactory: ManualCaptureRequestFactory? = null
     private var currentParams = CameraParams()
     private var previewSurface: Surface? = null
+    private var histogramReader: com.procamera.recorder.camera.LuminanceHistogramReader? = null
+
+    /** See [com.procamera.recorder.camera.LuminanceHistogramReader]'s doc — preview-only,
+     * frozen (not updated) while a recording is in progress. */
+    var onHistogramUpdated: ((FloatArray) -> Unit)? = null
 
     // User-configurable settings
     private var nextVideoConfig: CameraCapabilityInspector.VideoConfigCandidate? = null
@@ -371,9 +381,16 @@ class RecordingPipeline(private val context: Context) {
             outputDir.mkdirs()
             currentOutputDir = outputDir
 
+            // Sampled once, here, at the start of the take — see DeviceOrientationTracker's
+            // doc for why this is needed at all despite the app window being locked to
+            // sensorLandscape (portrait-held recording support).
+            val orientationHint = orientationTracker.orientationHintDegreesFor(
+                sessionController.characteristicsFor(caps.cameraId),
+            )
             val muxer = SegmentedMuxerController(
                 outputPathForSegment = { index -> File(outputDir, "segment_$index.mp4").absolutePath },
                 segmentDurationUs = segmentDurationMinutes * 60 * 1_000_000L,
+                orientationHintDegrees = orientationHint,
             )
             muxerController = muxer
 
@@ -526,6 +543,7 @@ class RecordingPipeline(private val context: Context) {
             if (gotLock) sessionMutex.unlock()
         }
         nativeEngine.close()
+        orientationTracker.stop()
         audioEngineActive = false
         pipelineState = PipelineState.IDLE
     }
