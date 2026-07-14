@@ -199,29 +199,54 @@ fun MainScreen(
             }
         }
 
-        // ── Error banner ──────────────────────────────────────────────────────
-        AnimatedVisibility(
-            visible = state.errorMessage != null,
-            enter = fadeIn(),
-            exit = fadeOut(),
+        // ── Error / thermal banners (stacked, error on top) ──────────────────────
+        Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding(),
         ) {
-            state.errorMessage?.let { msg ->
+            AnimatedVisibility(
+                visible = state.errorMessage != null,
+                enter = fadeIn(),
+                exit = fadeOut(),
+            ) {
+                state.errorMessage?.let { msg ->
+                    Text(
+                        text = msg,
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(RecRed.copy(alpha = 0.92f))
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                            .clickable { viewModel.dismissError() },
+                    )
+                }
+            }
+
+            // §4.6: persists as long as thermalStatus stays >= SEVERE (no dismiss — this
+            // isn't a transient error, the condition has to actually clear). Recording
+            // quality is not auto-reduced (spec decision — left to the user); this banner
+            // is the entire user-facing response implemented so far, see ThermalMonitor's
+            // doc for the deferred preview resolution/fps step-down.
+            AnimatedVisibility(
+                visible = state.isThermalWarning,
+                enter = fadeIn(),
+                exit = fadeOut(),
+            ) {
                 Text(
-                    text = msg,
+                    text = "端末が高温になっています。録画の中断を検討してください。",
                     color = Color.White,
                     fontSize = 12.sp,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(RecRed.copy(alpha = 0.92f))
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                        .clickable { viewModel.dismissError() },
+                        .background(Amber.copy(alpha = 0.92f))
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
                 )
             }
         }
-        
+
+
         if (state.settings.showSettingsSheet) {
             SettingsBottomSheet(
                 state = state,

@@ -14,6 +14,7 @@ import com.procamera.recorder.camera.CameraCapabilityInspector
 import com.procamera.recorder.camera.CameraParams
 import com.procamera.recorder.camera.CaptureRangeClamper
 import com.procamera.recorder.pipeline.RecordingPipeline
+import com.procamera.recorder.utils.ThermalMonitor
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,6 +41,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     private val pipeline = RecordingPipeline(app)
     private val capabilityInspector =
         CameraCapabilityInspector(app.getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager)
+    private val thermalMonitor = ThermalMonitor(app)
 
     private val _uiState = MutableStateFlow(CameraUiState())
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
@@ -54,6 +56,15 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         // best-effort finalize of whatever segment is currently open (§4.6) — see
         // ProCameraApplication and RecordingPipeline.emergencyFinalizeCurrentSegment's docs.
         (app as? com.procamera.recorder.ProCameraApplication)?.activeRecordingPipeline = pipeline
+
+        // §4.6: monitor for the whole time this screen is up (not just while recording —
+        // extended preview during setup/soundcheck can heat the device too), surfacing a
+        // warning banner at THERMAL_STATUS_SEVERE+. Recording quality itself is never
+        // auto-changed (per spec — that decision is left to the user); see ThermalMonitor's
+        // doc for what's implemented vs deferred (preview resolution/fps step-down).
+        thermalMonitor.start { status ->
+            _uiState.update { it.copy(thermalStatus = status) }
+        }
 
         pipeline.onAutoWbGainsMeasured = { gains, kelvin ->
             lastAutoKelvin = kelvin
@@ -490,6 +501,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
+        thermalMonitor.stop()
         stopRecordingJobs()
         pipeline.stopAll()
         // Best-effort hygiene: if the ViewModel is torn down while the foreground service

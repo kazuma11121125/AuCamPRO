@@ -167,6 +167,12 @@ data class CameraUiState(
     // ── Error / informational banner ─────────────────────────────────────────
     val errorMessage: String? = null,
 
+    // ── Thermal (§4.6) ───────────────────────────────────────────────────────
+    // android.os.PowerManager.THERMAL_STATUS_* — kept as a raw Int (rather than importing
+    // the framework type into this otherwise-framework-free state class) since the only
+    // consumer is a >= THERMAL_STATUS_SEVERE comparison in the UI layer.
+    val thermalStatus: Int = 0, // PowerManager.THERMAL_STATUS_NONE
+
     // ── UI Visibility ────────────────────────────────────────────────────────
     val showControls: Boolean = true,
 ) {
@@ -177,6 +183,10 @@ data class CameraUiState(
     val recButtonEnabled: Boolean get() =
         recordingState == RecordingUiState.Previewing ||
             recordingState == RecordingUiState.Recording
+
+    // THERMAL_STATUS_SEVERE == 3 (android.os.PowerManager) — see thermalStatus's doc for
+    // why this is a raw Int comparison rather than a framework-typed field.
+    val isThermalWarning: Boolean get() = thermalStatus >= 3
 
     val elapsedFormatted: String get() {
         val totalSec = recordingElapsedMs / 1_000L

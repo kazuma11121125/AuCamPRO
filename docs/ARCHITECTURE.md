@@ -237,7 +237,17 @@ advisorから「`seedAudioAnchor()`が実際にフレーム相関に成功して
 - `RecordingPipeline.emergencyFinalizeCurrentSegment()`: エンコーダへのEOS送信やドレイン待ちなど正常な停止シーケンスは一切行わず、`muxerController?.stop()`のみを直接・同期的に呼ぶ(既にエンコーダからmuxerへ渡された分だけを確定させ、有効なファイルとして残す。encoder内部でまだ滞留している数フレーム分は失われる想定——「完全なファイル」ではなく「再生可能なファイル」を目標にしている)。例外は握りつぶす(クラッシュハンドラ内で新たな例外を投げてはいけないため)。
 - `ProCameraApplication`: `Thread.setDefaultUncaughtExceptionHandler`をインストールし、上記を試みたのちに元のハンドラへ委譲する(クラッシュ自体は通常通り発生・報告される——これは「クラッシュを防ぐ」仕組みではなく「クラッシュ時のデータ損失を減らす」仕組み)。`CameraControlViewModel`が`init{}`でこのApplicationの`activeRecordingPipeline`に自身のパイプラインを登録する(DIグラフを経由せず、シンプルな直接参照で済ませた)。
 
-**スコープの限界(重要)**: この仕組みはJVM例外によるクラッシュのみを対象とする。ネイティブクラッシュ(C++側のクラッシュ、Oboe/JNI層など)・ANR・OSによる強制kill(メモリ不足等)はこの経路では一切救えない——`Thread.UncaughtExceptionHandler`はJavaレベルの未捕捉例外にしか発火しない。熱管理(サーマルスロットリングの監視・ビットレート自動引き下げ・警告UI)は今回未着手のまま(§Phase4bの残課題)。実機での例外強制発生による動作検証も未実施。
+**スコープの限界(重要)**: この仕組みはJVM例外によるクラッシュのみを対象とする。ネイティブクラッシュ(C++側のクラッシュ、Oboe/JNI層など)・ANR・OSによる強制kill(メモリ不足等)はこの経路では一切救えない——`Thread.UncaughtExceptionHandler`はJavaレベルの未捕捉例外にしか発火しない。実機での例外強制発生による動作検証も未実施。
+
+### 熱管理: ステータス監視 + 警告UI(2026-07-14)
+
+`ThermalMonitor`(`utils/ThermalMonitor.kt`)を実装した。`PowerManager.addThermalStatusListener`(API29+、minSdkと一致)で状態変化を監視し、`getThermalHeadroom()`(API30+のみ)は`Build.VERSION.SDK_INT`ガード付きの補助シグナルとして公開(命令書§4.6が指摘するAPIレベル不整合への対応)。`CameraControlViewModel`が録画中だけでなくこの画面が表示されている間ずっと監視する(準備・サウンドチェック中の長時間プレビューでも端末は発熱し得るため)。
+
+**実装したのは命令書§4.6の3段階(プレビュー解像度低下→プレビューfps低下→ユーザー警告)のうち最終段のみ**: `THERMAL_STATUS_SEVERE`(=3)以上でオレンジの警告バナーを表示する(`MainScreen.kt`、エラーバナーと同じ位置に縦に積む形)。**録画品質は命令書の明示的な指示どおり自動変更していない**(ユーザー判断に委ねる)。
+
+**未実装として明示的に残したもの**: プレビュー解像度/fpsの段階的引き下げ。現状の`CameraParams`/`CameraSessionController`にはプレビューストリームサイズを(録画用エンコーダ解像度とは独立に)動的変更する仕組みが無く、これを実装するには相応の規模の追加設計(Surfaceサイズ管理、セッション再構成のタイミング等)が必要——今回のバナー実装と同じコミットに含めず、別タスクとして切り出した。
+
+**実機未検証**: エミュレータはサーマルセンサーを持たないため`currentThermalStatus`は常に`NONE`を返す。リスナー登録自体はクラッシュなく動作することをエミュレータで確認したが、実際のSEVERE遷移・バナー表示・複数回の状態変化は実機でのみ検証可能。
 
 ---
 
