@@ -148,9 +148,9 @@ private fun DrawScope.drawMeterBar(peakDb: Float, rmsDb: Float) {
     if (rmsDb > DB_FLOOR) {
         // Draw three colour segments: green up to -12, yellow -12 to -6, orange -6 to 0.
         // We clip each segment to the actual rms level so the bar is segmented by colour.
-        drawSegment(rmsTop, h, w, h, -60f, -12f, MeterGreen, cornerRadius)
-        drawSegment(rmsTop, h, w, h, -12f, -6f, MeterYellow, cornerRadius)
-        drawSegment(rmsTop, h, w, h, -6f, 0f, MeterOrange, cornerRadius)
+        drawSegment(rmsTop, h, w, -60f, -12f, MeterGreen, cornerRadius)
+        drawSegment(rmsTop, h, w, -12f, -6f, MeterYellow, cornerRadius)
+        drawSegment(rmsTop, h, w, -6f, 0f, MeterOrange, cornerRadius)
     }
 
     // Peak hold tick mark (1px line in red when near clip, else white)
@@ -190,7 +190,6 @@ private fun DrawScope.drawSegment(
     rmsTop: Float,
     totalH: Float,
     totalW: Float,
-    @Suppress("SameParameterValue") totalHIgnored: Float,
     zoneMinDb: Float,
     zoneMaxDb: Float,
     color: Color,

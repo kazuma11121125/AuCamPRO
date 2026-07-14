@@ -1,6 +1,7 @@
 package com.procamera.recorder.pipeline
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.Context
 import android.hardware.camera2.CameraManager
 import android.media.MediaCodec
@@ -8,6 +9,7 @@ import android.media.MediaFormat
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
 import androidx.annotation.RequiresPermission
@@ -129,6 +131,7 @@ class RecordingPipeline(private val context: Context) {
     private var audioEncoder: AudioEncoder? = null
     private var muxerController: SegmentedMuxerController? = null
     private var ptsClockDomain: PtsClockDomain? = null
+    private var currentOutputDir: File? = null
 
     // ──────────────────────────────────────────────────────────────────────────────
     // Public methods
@@ -290,6 +293,7 @@ class RecordingPipeline(private val context: Context) {
                 "recordings/${System.currentTimeMillis()}",
             )
             outputDir.mkdirs()
+            currentOutputDir = outputDir
 
             val muxer = SegmentedMuxerController(
                 outputPathForSegment = { index -> File(outputDir, "segment_$index.mp4").absolutePath },
@@ -461,13 +465,52 @@ class RecordingPipeline(private val context: Context) {
         muxerController = null
         pipelineState = PipelineState.IDLE
 
-        if (restartPreview) {
-            // Re-open a preview-only session. This is a suspend call; callers that pass
-            // restartPreview=true must be in a coroutine (stopRecording() is suspend).
-            // We launch it as fire-and-forget on the caller's coroutine context by having
-            // the public stopRecording() method be suspend and calling this inline.
-            // Since we can't easily call a suspend function here, the ViewModel is
-            // responsible for calling startPreview() after stopRecording() returns.
+        // Preview restart itself is *not* done here despite the restartPreview parameter:
+        // this is a plain (non-suspend) function, and re-opening the camera session is a
+        // suspend call. restartPreview only distinguishes the two callers' intent —
+        // stopRecording() (true) relies on the ViewModel calling startPreview() again after
+        // it returns; stopAll() (false) tears the pipeline down instead. See stopRecording's
+        // doc.
+        currentOutputDir?.let { exportToPublicMoviesIfRequested(it) }
+        currentOutputDir = null
+    }
+
+    /**
+     * If [storageLocation] is [StorageLocation.PublicMovies], copies each finalised segment
+     * `.mp4` out of the app-private [outputDir] into the shared `Movies/ProCamera` collection
+     * via MediaStore (so it shows up in the gallery), then deletes the app-private copy.
+     * No-op for [StorageLocation.AppPrivate]. Runs synchronously — safe here since this is
+     * always called after encoders/muxer are already fully stopped and drained, off the
+     * main thread (`stopRecording()` is suspend and called from a background coroutine).
+     */
+    private fun exportToPublicMoviesIfRequested(outputDir: File) {
+        if (storageLocation != StorageLocation.PublicMovies) return
+        val segmentFiles = outputDir.listFiles { f -> f.extension == "mp4" }?.sortedBy { it.name }
+        if (segmentFiles.isNullOrEmpty()) return
+
+        val resolver = context.contentResolver
+        for (file in segmentFiles) {
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.Video.Media.DISPLAY_NAME, file.name)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/ProCamera")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+                if (uri == null) {
+                    Log.e(TAG, "MediaStore insert failed for ${file.name}")
+                    continue
+                }
+                resolver.openOutputStream(uri)?.use { out ->
+                    file.inputStream().use { it.copyTo(out) }
+                }
+                resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
+                file.delete()
+                Log.i(TAG, "Exported ${file.name} to Movies/ProCamera")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to export ${file.name} to MediaStore Movies", e)
+            }
         }
     }
 

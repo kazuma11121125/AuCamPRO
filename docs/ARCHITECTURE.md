@@ -187,6 +187,29 @@ advisorから「`seedAudioAnchor()`が実際にフレーム相関に成功して
 - プレビュー→録画セッション切り替え時の実際の映像凍結時間(Sony SO-51C で計測)
 - `PreviewSurfaceView` の `aspectRatio = 9f/16f` が実機センサーと一致するか(センサー方向依存)
 - 60fps メーターポーリングの CPU 占有率が許容範囲内か
+- **`List<Surface>` 化された `startRepeating()`(プレビュー+エンコーダ InputSurface の同時ストリーム)自体が実機で動作するか**——Phase4スモークテストは Gemini による UI 実装(本セクション)より前の、単一 Surface 構成のコードで実施されたものであり、このマルチサーフェス版はまだ実機での動作実績がない(次項のエミュレータ検証でも録画開始まで到達できていない)。
+
+### エミュレータでの監査・検証(2026-07-14)
+
+ユーザーから「Phase4のUIをGeminiに途中までやってもらったが詰めが甘い」との指摘を受け、実機デバッグ不可の環境のため AVD(`procamera_test`, API34 google_apis x86_64, Pixel6 profile)でコードの監査と可能な範囲での動作確認を行った。
+
+**発見・修正したバグ(すべて実際に読んで見つけたもので、progress_summary.md の「やったこと」記載を鵜呑みにしなかった結果):**
+
+1. `ColorTemperatureConverter.kt` の書き換えで公開APIが `RggbChannelVector` 直結になり、既存の `ColorTemperatureConverterTest.kt` が追従しておらずコンパイル不能——`testDebugUnitTest` が**そもそも実行できない状態**でコミットされていた。純粋計算コア(`Float`版)とフレームワークラッパー(`RggbChannelVector`版)に再分離して修正。
+2. `CameraControlViewModel.stopRecording()` / `MainScreen.kt` のレンズ切替 `.clickable` — 2箇所で lint `MissingPermission` が発生しビルド不能(`assembleDebug lint` で検出)。
+3. `RecordingPipeline`: `selectVideoConfig()` で設定した `nextVideoConfig` が `startRecording()` 側で一切参照されず、設定画面の解像度/FPS選択が録画に反映されていなかった(死んだ状態変数)。
+4. `RecordingPipeline.storageLocation`: `setStorageLocation()` で設定されるが `startRecording()` の出力先計算で一切参照されておらず、「Movies フォルダに保存」を選んでも常にアプリ専用領域に書かれていた。`stopRecordingInternal()` 後に MediaStore へコピーする `exportToPublicMoviesIfRequested()` を追加して解消(§下記)。
+5. `AudioMeterBar.kt` の `drawSegment()` に未使用の重複パラメータ(`totalHIgnored`)が残っていた(軽微、動作に影響なし)。
+
+**エミュレータ特有の問題への対応(実機の判定ロジックは変更していない)**:
+
+- AVD のカメラHALはセンサー物理サイズとして `3.2×2.4mm`(対角 4.0mm)という実機ではあり得ない値を返すため、`CameraCapabilityInspector.findStandardRearLens()` の実機向けプラウシビリティフロア(`MIN_PLAUSIBLE_MAIN_SENSOR_DIAGONAL_MM = 5.0mm`)に常に失敗していた。`isRunningOnEmulator()`(`Build.FINGERPRINT`等の標準判定)を追加し、エミュレータ上かつ通常の判定で候補が0件のときのみこのフロアをスキップするフォールバックとした。
+- `videoConfigCandidates()`(4K HEVC / 1080p60 H.264 の2択)がどちらもこのエミュレータのソフトウェアエンコーダでは通らず(60fps非対応)、`startPreview()` が例外を投げていた。`supportedVideoConfigs()` のより広い候補リストへの追加フォールバックで解消——実機でも主/副候補が両方非対応な場合の保険として機能する。
+- debug ビルドタイプに `x86_64` ABI を追加(release/`defaultConfig` は `arm64-v8a` のまま)し、AVD 上でネイティブ(Oboe/JNI)libがロードできるようにした。
+
+**エミュレータで確認できたこと**: アプリ起動、権限フロー(CAMERA/RECORD_AUDIO/POST_NOTIFICATIONS)、カメラプレビューのストリーミング、Auto WB/AF 測定値のライブUI反映(実測 5250K 等)、ISO/シャッター/フォーカス/WBスライダーの手動操作、CAMERA/AUDIOタブ切替、3-BAND EQ、設定シート(解像度選択が実際に反映されることを確認、保存先ラジオボタンの状態管理)、エラーバナー表示とその後のUI継続動作(クラッシュなし)。
+
+**エミュレータで確認できなかったこと(録画の実データパス全体)**: REC ボタン押下→`startRecording()` の中で、プレビュー用 Surface とエンコーダの InputSurface を同時ストリームとしてセッション再構成する箇所で AVD のカメラHALが `Unsupported set of inputs/outputs provided` を返し失敗する。これはこのエミュレータのカメラHAL実装の制約と考えられる(該当コードパス自体が実機未検証である点は上記「実機確認待ち事項」に追記した)が、確定ではない。そのため **Video/Audioエンコード→Mux→ファイル生成のパイプライン全体、および今回追加した Movies フォルダへの MediaStore エクスポート機能は、実機または録画開始まで到達できる別のエミュレータ構成での再検証が必要**。
 
 ---
 
