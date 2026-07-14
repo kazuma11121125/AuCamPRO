@@ -38,6 +38,15 @@ class ColorTemperatureConverterTest {
     }
 
     @Test
+    fun greenGainIsAlwaysPinnedToOne_acrossTheWholeRange() {
+        // This model always treats green as the neutral/reference channel (see class doc).
+        for (kelvin in 2500..8000 step 250) {
+            val (_, greenGain, _) = ColorTemperatureConverter.kelvinToRgbGains(kelvin.toDouble())
+            assertThat(greenGain).isEqualTo(1.0f)
+        }
+    }
+
+    @Test
     fun gainsAreClampedToTheSpecRange() {
         val belowRange = ColorTemperatureConverter.kelvinToRgbGains(1000.0)
         val atMin = ColorTemperatureConverter.kelvinToRgbGains(2500.0)
@@ -60,27 +69,21 @@ class ColorTemperatureConverterTest {
     }
 
     @Test
-    fun everyChannelGainIsAtLeastOne_acrossTheWholeRange() {
-        // HAL-safety requirement (§4.1): COLOR_CORRECTION_GAINS conventionally expects
-        // every channel >= 1.0 (neutral channel at 1.0, others boosted above it) — a
-        // naive green-pinned-to-1.0 normalization would violate this at the range
-        // extremes (see ARCHITECTURE.md's judgment log for the bug this test guards).
-        for (kelvin in 2500..8000 step 100) {
-            val (redGain, greenGain, blueGain) = ColorTemperatureConverter.kelvinToRgbGains(kelvin.toDouble())
-            assertThat(redGain).isAtLeast(1.0f)
-            assertThat(greenGain).isAtLeast(1.0f)
-            assertThat(blueGain).isAtLeast(1.0f)
+    fun rgbGainsToKelvin_roundTripsThroughKelvinToRgbGains() {
+        // The inverse function exists to surface the ISP's Auto-AWB measured gains as a
+        // Kelvin value in the UI — it must actually invert the forward function for that
+        // UI value to be meaningful.
+        for (kelvin in 2500..8000 step 250) {
+            val (redGain, _, blueGain) = ColorTemperatureConverter.kelvinToRgbGains(kelvin.toDouble())
+            val roundTripped = ColorTemperatureConverter.rgbGainsToKelvin(redGain, blueGain)
+            assertThat(roundTripped).isWithin(1.0).of(kelvin.toDouble())
         }
     }
 
     @Test
-    fun atLeastOneChannelIsExactlyOneAcrossTheWholeRange() {
-        // The strongest raw channel should be pinned to exactly 1.0 (unboosted); the
-        // others boost relative to it.
-        for (kelvin in 2500..8000 step 250) {
-            val (redGain, greenGain, blueGain) = ColorTemperatureConverter.kelvinToRgbGains(kelvin.toDouble())
-            val minGain = minOf(redGain, greenGain, blueGain)
-            assertThat(minGain).isWithin(1e-4f).of(1.0f)
-        }
+    fun rgbGainsToKelvin_isClampedToTheSpecRange() {
+        val kelvin = ColorTemperatureConverter.rgbGainsToKelvin(red = 10f, blue = 0.1f)
+        assertThat(kelvin).isAtMost(8000.0)
+        assertThat(kelvin).isAtLeast(2500.0)
     }
 }

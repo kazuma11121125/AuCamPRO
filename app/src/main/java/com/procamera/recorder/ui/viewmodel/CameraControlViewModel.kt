@@ -220,13 +220,13 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    @androidx.annotation.RequiresPermission(Manifest.permission.CAMERA)
     fun stopRecording() {
         if (_uiState.value.recordingState != RecordingUiState.Recording) return
         _uiState.update { it.copy(recordingState = RecordingUiState.Stopping) }
         viewModelScope.launch {
             stopRecordingJobs()
             pipeline.stopRecording()
-            @Suppress("MissingPermission")
             val surface = previewSurface
             if (surface != null) {
                 val caps = pipeline.startPreview(surface, _uiState.value.toCameraParams())

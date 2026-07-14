@@ -158,6 +158,11 @@ class RecordingPipeline(private val context: Context) {
             val lens = capabilityInspector.findStandardRearLens()
                 ?: error("No standard rear lens found on this device")
 
+            // Default candidate for the CameraCapabilities snapshot (used to populate slider
+            // ranges etc.). The user's actual Settings selection (selectVideoConfig()) is
+            // consulted later, at encoder-creation time in startRecording() — preview doesn't
+            // care about the eventual encoder's resolution, so there is no need to restart
+            // the preview session just because the user picked a different video config.
             val videoConfig = capabilityInspector.videoConfigCandidates().firstOrNull {
                 capabilityInspector.isVideoConfigSupported(
                     it.mimeType, it.width, it.height, it.frameRate, it.bitrate,
@@ -266,6 +271,14 @@ class RecordingPipeline(private val context: Context) {
             ptsClockDomain = pts
             pts.start()
 
+            // Prefer the user's Settings selection (selectVideoConfig()) when one is set and
+            // still valid for this device; otherwise fall back to the default picked at
+            // startPreview() time. Re-validated here (not just trusted from the UI's cached
+            // selection) since the lens may have changed since the user picked it.
+            val recordingVideoConfig = nextVideoConfig?.takeIf {
+                capabilityInspector.isVideoConfigSupported(it.mimeType, it.width, it.height, it.frameRate, it.bitrate)
+            } ?: caps.videoConfig
+
             val outputDir = File(
                 context.getExternalFilesDir(null),
                 "recordings/${System.currentTimeMillis()}",
@@ -279,11 +292,11 @@ class RecordingPipeline(private val context: Context) {
             muxerController = muxer
 
             val video = VideoEncoder(
-                mimeType = caps.videoConfig.mimeType,
-                width = caps.videoConfig.width,
-                height = caps.videoConfig.height,
-                frameRate = caps.videoConfig.frameRate,
-                bitrate = caps.videoConfig.bitrate,
+                mimeType = recordingVideoConfig.mimeType,
+                width = recordingVideoConfig.width,
+                height = recordingVideoConfig.height,
+                frameRate = recordingVideoConfig.frameRate,
+                bitrate = recordingVideoConfig.bitrate,
                 ptsClockDomain = pts,
                 callback = object : VideoEncoder.Callback {
                     override fun onOutputFormatChanged(format: MediaFormat) =

@@ -412,6 +412,14 @@ private fun CameraControlsPanel(
 ) {
     val caps = state.capabilities
 
+    // switchLens() requires CAMERA — safe here because this whole screen only composes
+    // after MainActivity's PermissionGate has already verified CAMERA is granted; lint
+    // can't see across that composable boundary, so it's suppressed at this call site.
+    @Suppress("MissingPermission")
+    fun onLensSelected(lens: com.procamera.recorder.camera.CameraCapabilityInspector.AvailableLens) {
+        viewModel.switchLens(lens)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -434,7 +442,7 @@ private fun CameraControlsPanel(
                             .clip(RoundedCornerShape(16.dp))
                             .background(bg)
                             .border(1.dp, if (isSelected) Amber else MaterialTheme.colorScheme.outline, RoundedCornerShape(16.dp))
-                            .clickable { viewModel.switchLens(lens) }
+                            .clickable { onLensSelected(lens) }
                             .padding(horizontal = 12.dp, vertical = 4.dp),
                         contentAlignment = Alignment.Center
                     ) {
