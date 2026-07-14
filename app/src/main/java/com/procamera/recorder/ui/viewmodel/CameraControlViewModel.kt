@@ -49,6 +49,12 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     private var lastAutoFocus: Float? = null
 
     init {
+        // Registers this ViewModel's single RecordingPipeline instance with the
+        // Application-level crash handler so an uncaught exception can attempt a
+        // best-effort finalize of whatever segment is currently open (§4.6) — see
+        // ProCameraApplication and RecordingPipeline.emergencyFinalizeCurrentSegment's docs.
+        (app as? com.procamera.recorder.ProCameraApplication)?.activeRecordingPipeline = pipeline
+
         pipeline.onAutoWbGainsMeasured = { gains, kelvin ->
             lastAutoKelvin = kelvin
             lastAutoGains = gains
@@ -491,6 +497,8 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         // doc says is NOT covered — the pipeline is dying here too), at least don't leave
         // a stuck notification/wake lock behind if the process happens to survive this.
         stopRecordingService()
+        val app = getApplication<Application>() as? com.procamera.recorder.ProCameraApplication
+        if (app?.activeRecordingPipeline === pipeline) app.activeRecordingPipeline = null
     }
 
     // ──────────────────────────────────────────────────────────────────────────

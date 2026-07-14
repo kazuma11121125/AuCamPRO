@@ -228,6 +228,17 @@ advisorから「`seedAudioAnchor()`が実際にフレーム相関に成功して
 
 **実機未検証(重要)**: このAVDのカメラHALがVideoEncoder InputSurfaceへのストリーミング自体を(上記の追加実験の通り)受け付けないため、**録画そのものがエミュレータ上で開始できず、この一連の変更全体(Service起動タイミング・エンコーダ単体への再構成・Mutex排他制御)が実際の録画中に動作するかは未検証**。個別には標準的なAndroid API/Kotlin並行処理の用法であり、非録画時のプレビューのバックグラウンド/フォアグラウンド往復(`adb shell input keyevent KEYCODE_HOME`→再起動)はエミュレータで確認しクラッシュなし・正常復帰を確認したが、これは録画中の経路(§4.6の本題)の検証にはならない。**Phase5で実機による確認が必須**。
 
+**advisorレビューでの3点の追加修正**: 上記のFGS実装直後にadvisorレビューを受け、次を修正した。(1) `RecordingService`が`START_STICKY`だったが、このServiceはパイプラインを所有せずViewModel側に完全に従属するため、プロセスkill後にOSが単独復元しても紐づく録画が存在しない(通知とWakeLockだけが亡霊のように残る)——`START_NOT_STICKY`に変更。(2) フォアグラウンドサービスの起動を`Event.Started`(非同期のパイプライン構築完了後)から`startRecording()`の先頭(RECタップの瞬間、フォアグラウンドが保証される)に前倒し——API31+はバックグラウンドからのcamera種別FGS起動を`ForegroundServiceStartNotAllowedException`で拒否し得るため。(3) `sessionMutex`の適用範囲が`startPreview`/`startRecording`/`detachPreviewSurface`の3経路に留まり、`stopRecordingInternal`・`stopAll`のセッション操作が排他制御の外にあったのを、suspend経路は同じロック経由に統一し、`stopAll()`(ViewModel.onCleared()から同期的に呼ばれるため suspend化不可)は`tryLock()`による最善努力の排他制御に変更した。
+
+### クラッシュセーフな現在セグメントの保存(2026-07-14)
+
+`SegmentedMuxerController`は、ローテーションが完了するたびに**過去の**セグメントファイルを確実にfinalize(有効なmoovボックス付きで`stop()`+`release()`)している(クラス doc 参照)——つまりクラッシュで失われ得るのは、常に「現在録画中の1セグメントのみ」であり、既に完了したセグメント群はそもそも安全、ということが今回の調査で判明した。この前提のもと、Kotlin/Java例外によるクラッシュ発生時に**現在のセグメントだけ**を最善努力で救う仕組みを追加した:
+
+- `RecordingPipeline.emergencyFinalizeCurrentSegment()`: エンコーダへのEOS送信やドレイン待ちなど正常な停止シーケンスは一切行わず、`muxerController?.stop()`のみを直接・同期的に呼ぶ(既にエンコーダからmuxerへ渡された分だけを確定させ、有効なファイルとして残す。encoder内部でまだ滞留している数フレーム分は失われる想定——「完全なファイル」ではなく「再生可能なファイル」を目標にしている)。例外は握りつぶす(クラッシュハンドラ内で新たな例外を投げてはいけないため)。
+- `ProCameraApplication`: `Thread.setDefaultUncaughtExceptionHandler`をインストールし、上記を試みたのちに元のハンドラへ委譲する(クラッシュ自体は通常通り発生・報告される——これは「クラッシュを防ぐ」仕組みではなく「クラッシュ時のデータ損失を減らす」仕組み)。`CameraControlViewModel`が`init{}`でこのApplicationの`activeRecordingPipeline`に自身のパイプラインを登録する(DIグラフを経由せず、シンプルな直接参照で済ませた)。
+
+**スコープの限界(重要)**: この仕組みはJVM例外によるクラッシュのみを対象とする。ネイティブクラッシュ(C++側のクラッシュ、Oboe/JNI層など)・ANR・OSによる強制kill(メモリ不足等)はこの経路では一切救えない——`Thread.UncaughtExceptionHandler`はJavaレベルの未捕捉例外にしか発火しない。熱管理(サーマルスロットリングの監視・ビットレート自動引き下げ・警告UI)は今回未着手のまま(§Phase4bの残課題)。実機での例外強制発生による動作検証も未実施。
+
 ---
 
 ## 採用バージョン一覧(2026-07-13 時点で実在確認済み)

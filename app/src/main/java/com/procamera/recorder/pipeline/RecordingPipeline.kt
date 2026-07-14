@@ -506,6 +506,37 @@ class RecordingPipeline(private val context: Context) {
         if (error != null) Log.w(TAG, "setMonitoringEnabled($enabled) returned error: $error")
     }
 
+    /**
+     * Best-effort crash-safety net (§4.6): closes whatever [MediaMuxer] is currently open
+     * (via [SegmentedMuxerController.stop]) so it gets a valid moov box, without trying to
+     * cleanly signal EOS or drain the encoders first. Meant to be called from a
+     * [Thread.UncaughtExceptionHandler] — see [com.procamera.recorder.ProCameraApplication]
+     * — where the process is about to die and there is no time (or dispatcher guarantee)
+     * for the normal suspend stop sequence.
+     *
+     * Because [SegmentedMuxerController] finalizes each *past* segment as soon as
+     * rotation completes (see its class doc), only the current in-flight segment is ever
+     * at risk of being lost to a crash — this call is what saves *that* one. A few
+     * trailing frames already handed to the encoder but not yet delivered to the muxer
+     * callback are accepted as lost; the goal is a playable file, not a complete one.
+     *
+     * Deliberately swallows all exceptions — this runs during process teardown and must
+     * never throw past the caller (which re-throws to the platform's default crash
+     * handler regardless of what happens here).
+     *
+     * **実機未検証**: 実際にKotlin/Java例外によるクラッシュを発生させての検証は
+     * まだ行っていない(ネイティブクラッシュ・ANR・強制killはこの経路では
+     * そもそも救えない——JVM例外ハンドラが呼ばれるケースのみ対象)。
+     */
+    fun emergencyFinalizeCurrentSegment() {
+        try {
+            muxerController?.stop()
+            Log.w(TAG, "emergencyFinalizeCurrentSegment: muxer finalized")
+        } catch (e: Throwable) {
+            Log.e(TAG, "emergencyFinalizeCurrentSegment failed", e)
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────────────────────
     // Internal helpers
     // ──────────────────────────────────────────────────────────────────────────────
