@@ -78,14 +78,19 @@ JNIEXPORT void JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nati
     toEngine(handle)->setEqBandParams(band, freqHz, q, gainDb);
 }
 
+JNIEXPORT void JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nativeSetInputGainDb(
+    JNIEnv *, jobject, jlong handle, jfloat gainDb) {
+    toEngine(handle)->setInputGainDb(gainDb);
+}
+
 JNIEXPORT jfloat JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nativePeakDb(JNIEnv *, jobject,
-                                                                                             jlong handle) {
-    return toEngine(handle)->peakDb();
+                                                                                             jlong handle, jint channel) {
+    return toEngine(handle)->peakDb(channel);
 }
 
 JNIEXPORT jfloat JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nativeRmsDb(JNIEnv *, jobject,
-                                                                                            jlong handle) {
-    return toEngine(handle)->rmsDb();
+                                                                                            jlong handle, jint channel) {
+    return toEngine(handle)->rmsDb(channel);
 }
 
 JNIEXPORT jint JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nativeRingBufferOverrunCount(

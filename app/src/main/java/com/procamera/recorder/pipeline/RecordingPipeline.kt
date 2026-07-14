@@ -501,6 +501,10 @@ class RecordingPipeline(private val context: Context) {
         nativeEngine.setEqBandParams(band, freqHz, q, gainDb)
     }
 
+    fun setInputGainDb(gainDb: Float) {
+        nativeEngine.setInputGainDb(gainDb)
+    }
+
     fun setMonitoringEnabled(enabled: Boolean, outputDeviceId: Int = 0) {
         val error = nativeEngine.setMonitoringEnabled(enabled, outputDeviceId)
         if (error != null) Log.w(TAG, "setMonitoringEnabled($enabled) returned error: $error")

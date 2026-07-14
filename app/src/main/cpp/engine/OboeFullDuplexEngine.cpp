@@ -264,6 +264,7 @@ oboe::DataCallbackResult OboeFullDuplexEngine::onAudioReady(oboe::AudioStream * 
     auto *samples = static_cast<float *>(audioData);
     const size_t sampleCount = static_cast<size_t>(numFrames) * kChannelCount;
 
+    inputGain_.process(samples, sampleCount);
     eq_.process(samples, static_cast<size_t>(numFrames));
     limiter_.process(samples, sampleCount);
     meter_.process(samples, static_cast<size_t>(numFrames), kChannelCount);

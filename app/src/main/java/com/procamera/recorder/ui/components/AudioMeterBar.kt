@@ -85,26 +85,27 @@ fun AudioMeterBar(
 
 @Composable
 fun StereoAudioMeter(
-    peakDb: Float,
-    rmsDb: Float,
-    isClippingHeld: Boolean,
+    peakDbL: Float,
+    peakDbR: Float,
+    rmsDbL: Float,
+    rmsDbR: Float,
+    isClippingHeldL: Boolean,
+    isClippingHeldR: Boolean,
     modifier: Modifier = Modifier,
 ) {
     androidx.compose.foundation.layout.Row(
         modifier = modifier,
         horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp),
     ) {
-        // Two channels displayed symmetrically. Right-channel data is identical for now;
-        // per-channel native API is tracked for a later phase.
         AudioMeterBar(
-            peakDb = peakDb,
-            rmsDb = rmsDb,
-            isClippingHeld = isClippingHeld,
+            peakDb = peakDbL,
+            rmsDb = rmsDbL,
+            isClippingHeld = isClippingHeldL,
         )
         AudioMeterBar(
-            peakDb = peakDb,
-            rmsDb = rmsDb,
-            isClippingHeld = isClippingHeld,
+            peakDb = peakDbR,
+            rmsDb = rmsDbR,
+            isClippingHeld = isClippingHeldR,
         )
     }
 }

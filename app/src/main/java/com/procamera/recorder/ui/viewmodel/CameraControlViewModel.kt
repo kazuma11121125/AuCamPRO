@@ -89,7 +89,8 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     private var timerJob: Job? = null
     private var storageJob: Job? = null
 
-    private var lastClippingDetectedMs = 0L
+    private var lastClippingDetectedMsL = 0L
+    private var lastClippingDetectedMsR = 0L
     private val clippingHoldDurationMs = 3_000L
     private var previewSurface: Surface? = null
 
@@ -284,7 +285,8 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                 _uiState.update { state ->
                     state.copy(
                         recordingState = if (caps != null) RecordingUiState.Previewing else RecordingUiState.Idle,
-                        peakDb = -120f, rmsDb = -120f, isClippingHeld = false,
+                        peakDbL = -120f, peakDbR = -120f, rmsDbL = -120f, rmsDbR = -120f,
+                        isClippingHeldL = false, isClippingHeldR = false,
                     )
                 }
             } else {
@@ -380,6 +382,11 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         pipeline.setMonitoringEnabled(enabled)
     }
 
+    fun setInputGainDb(gainDb: Float) {
+        _uiState.update { it.copy(inputGainDb = gainDb) }
+        pipeline.setInputGainDb(gainDb)
+    }
+
     // ──────────────────────────────────────────────────────────────────────────
     // Settings
     // ──────────────────────────────────────────────────────────────────────────
@@ -406,6 +413,15 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     fun setSegmentDuration(minutes: Int) {
         _uiState.update { it.copy(settings = it.settings.copy(segmentDurationMinutes = minutes)) }
         pipeline.setSegmentDurationMinutes(minutes)
+    }
+
+    /**
+     * Preview-only composition guide — no pipeline call, unlike [setStorageLocation]/
+     * [setSegmentDuration]: it never touches the encoder's output aspect ratio. See
+     * [FrameLineAspectRatio]'s doc for why.
+     */
+    fun setFrameLineAspectRatio(ratio: FrameLineAspectRatio) {
+        _uiState.update { it.copy(settings = it.settings.copy(frameLineAspectRatio = ratio)) }
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -449,19 +465,28 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Pulls peakDb/rmsDb at ~60fps. Pull (Choreographer-style polling) chosen over
-     * JNI push per §4.2's "no JNI calls from audio callback thread" rule.
+     * Pulls per-channel peakDb/rmsDb at ~60fps. Pull (Choreographer-style polling) chosen
+     * over JNI push per §4.2's "no JNI calls from audio callback thread" rule.
      */
     private fun startMeterPolling() {
         meterJob = viewModelScope.launch {
             while (isActive) {
                 delay(16L)
-                val peak = pipeline.nativeEngine.peakDb()
-                val rms = pipeline.nativeEngine.rmsDb()
+                val peakL = pipeline.nativeEngine.peakDb(CHANNEL_LEFT)
+                val peakR = pipeline.nativeEngine.peakDb(CHANNEL_RIGHT)
+                val rmsL = pipeline.nativeEngine.rmsDb(CHANNEL_LEFT)
+                val rmsR = pipeline.nativeEngine.rmsDb(CHANNEL_RIGHT)
                 val nowMs = System.currentTimeMillis()
-                if (peak > CLIPPING_THRESHOLD_DB) lastClippingDetectedMs = nowMs
-                val clippingHeld = (nowMs - lastClippingDetectedMs) < clippingHoldDurationMs
-                _uiState.update { it.copy(peakDb = peak, rmsDb = rms, isClippingHeld = clippingHeld) }
+                if (peakL > CLIPPING_THRESHOLD_DB) lastClippingDetectedMsL = nowMs
+                if (peakR > CLIPPING_THRESHOLD_DB) lastClippingDetectedMsR = nowMs
+                val clippingHeldL = (nowMs - lastClippingDetectedMsL) < clippingHoldDurationMs
+                val clippingHeldR = (nowMs - lastClippingDetectedMsR) < clippingHoldDurationMs
+                _uiState.update {
+                    it.copy(
+                        peakDbL = peakL, peakDbR = peakR, rmsDbL = rmsL, rmsDbR = rmsR,
+                        isClippingHeldL = clippingHeldL, isClippingHeldR = clippingHeldR,
+                    )
+                }
             }
         }
     }
@@ -532,6 +557,8 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         const val TAG = "CameraControlViewModel"
         const val CLIPPING_THRESHOLD_DB = -0.1f
+        const val CHANNEL_LEFT = 0
+        const val CHANNEL_RIGHT = 1
         const val AUDIO_BITRATE_BPS = 256_000
         const val VIDEO_BITRATE_FALLBACK_BPS = 20_000_000
     }

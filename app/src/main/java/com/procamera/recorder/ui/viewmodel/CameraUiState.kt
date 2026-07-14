@@ -68,12 +68,38 @@ sealed interface StorageLocation {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Frame-line composition guide
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A composition guide overlaid on the preview — a bordered rectangle at [ratio] (width /
+ * height) with the area outside it dimmed, matching the "Frame lines" feature surveyed
+ * from Sony's Photography/Cinematography Pro apps (Sony PDF調査: "実際に記録される映像の
+ * アスペクト比とは独立しており、ポストプロダクションでのクロップを想定した構図決定に用いる").
+ *
+ * **確信度の明示**: this is deliberately *not* an encode-time crop — the recorded file's
+ * aspect ratio is unaffected; only the on-screen preview gets the guide overlay. A true
+ * encode-time crop to an arbitrary ratio (progress_summary.md's original "自由なアスペクト
+ * 比のクロップ設定" request) would require inserting a GL rendering stage between Camera2
+ * and the encoder's InputSurface — see [com.procamera.recorder.encoder.VideoEncoder]'s doc
+ * for why the current direct camera→encoder path's PTS behavior was hard-won on real
+ * hardware, and why that GL insertion was deferred rather than attempted blind.
+ */
+enum class FrameLineAspectRatio(val ratio: Float?, val label: String) {
+    Off(null, "オフ"),
+    Square(1f, "1:1"),
+    Classic(4f / 3f, "4:3"),
+    Portrait(9f / 16f, "9:16"),
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Settings state (shown in SettingsBottomSheet)
 // ──────────────────────────────────────────────────────────────────────────────
 
 data class SettingsState(
     val storageLocation: StorageLocation = StorageLocation.AppPrivate,
     val segmentDurationMinutes: Int = 5,  // 1, 5, 10, 15, 30
+    val frameLineAspectRatio: FrameLineAspectRatio = FrameLineAspectRatio.Off,
     val showSettingsSheet: Boolean = false,
 )
 
@@ -142,15 +168,25 @@ data class CameraUiState(
     val zoomRatio: Float = 1.0f,
     val maxZoomRatio: Float = 1.0f,
 
-    // ── Audio meter ───────────────────────────────────────────────────────────
-    val peakDb: Float = -120f,
-    val rmsDb: Float = -120f,
-    val isClippingHeld: Boolean = false,
+    // ── Audio meter (independent per channel — see dsp/PeakRmsMeter.h) ─────────
+    val peakDbL: Float = -120f,
+    val peakDbR: Float = -120f,
+    val rmsDbL: Float = -120f,
+    val rmsDbR: Float = -120f,
+    val isClippingHeldL: Boolean = false,
+    val isClippingHeldR: Boolean = false,
 
     // ── Audio status ─────────────────────────────────────────────────────────
     val xrunCount: Int = 0,
     val ringBufferOverrunCount: Int = 0,
     val monitoringEnabled: Boolean = false,
+
+    // ── Input gain (record level) ───────────────────────────────────────────
+    // Post-ADC digital gain, applied before EQ/limiter — see dsp/InputGain.h. Range is
+    // asymmetric ([-24, +12]dB, see the slider) toward attenuation: this app's target
+    // scenario is a loud live band (110-125dB SPL), where the built-in mic's fixed analog
+    // gain (tuned for ordinary use) is far more likely to need pulling down than boosting.
+    val inputGainDb: Float = 0f,
 
     // ── EQ ───────────────────────────────────────────────────────────────────
     val eqBands: List<EqBandState> = EqBandState.defaults(),
@@ -211,6 +247,11 @@ data class CameraUiState(
     }
 
     val kelvinDisplayText: String get() = "${kelvin.toInt()}K"
+
+    val inputGainDisplayText: String get() {
+        val sign = if (inputGainDb > 0f) "+" else ""
+        return "$sign${"%.1f".format(inputGainDb)}dB"
+    }
 
     val focusDisplayText: String get() {
         if (focusDistanceDiopters == 0f) return "∞"

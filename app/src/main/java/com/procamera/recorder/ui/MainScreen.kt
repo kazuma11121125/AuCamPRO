@@ -15,6 +15,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -52,7 +53,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.procamera.recorder.ui.components.AudioMeterBar
+import com.procamera.recorder.ui.components.FrameLineOverlay
+import com.procamera.recorder.ui.components.StereoAudioMeter
 import com.procamera.recorder.ui.components.FocusSlider
 import com.procamera.recorder.ui.components.IsoSlider
 import com.procamera.recorder.ui.components.ManualControlSlider
@@ -139,17 +141,36 @@ fun MainScreen(
                 aspectRatio = previewAspectRatio,
             )
 
-            // Audio meter — right side overlay on the preview.
+            // Composition guide (§FrameLineAspectRatio's doc) — preview-only, does not
+            // affect the recorded file's aspect ratio. Must resolve to the exact same
+            // rect as PreviewSurfaceView above, so this uses the identical modifier chain
+            // (fillMaxSize().aspectRatio(...), not aspectRatio(...).fillMaxSize() or
+            // aspectRatio(...) alone) rather than relying on those being equivalent.
+            state.settings.frameLineAspectRatio.ratio?.let { ratio ->
+                FrameLineOverlay(
+                    targetAspectRatio = ratio,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .aspectRatio(previewAspectRatio, matchHeightConstraintsFirst = isLandscape),
+                )
+            }
+
+            // Audio meter — right side overlay on the preview. Two independent bars (L/R)
+            // since the mic input is stereo and one side can clip while the other doesn't
+            // (see CameraUiState's per-channel fields / dsp/PeakRmsMeter.h).
             Row(
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     .padding(end = 8.dp)
                     .height(200.dp),
             ) {
-                AudioMeterBar(
-                    peakDb = state.peakDb,
-                    rmsDb = state.rmsDb,
-                    isClippingHeld = state.isClippingHeld,
+                StereoAudioMeter(
+                    peakDbL = state.peakDbL,
+                    peakDbR = state.peakDbR,
+                    rmsDbL = state.rmsDbL,
+                    rmsDbR = state.rmsDbR,
+                    isClippingHeldL = state.isClippingHeldL,
+                    isClippingHeldR = state.isClippingHeldR,
                 )
             }
 
@@ -419,6 +440,7 @@ private fun ControlPanel(
 
             ControlPanel.Audio -> AudioControlsPanel(
                 state = state,
+                onInputGainChange = viewModel::setInputGainDb,
                 onEqGainChange = viewModel::setEqBandGain,
                 onEqFreqChange = viewModel::setEqBandFreq,
                 onEqQChange = viewModel::setEqBandQ,
@@ -676,9 +698,14 @@ private fun ShutterPresetRow(
 
 // ── Audio controls tab ────────────────────────────────────────────────────────
 
+// See CameraUiState.inputGainDb's doc for why this range is biased toward attenuation.
+private const val INPUT_GAIN_MIN_DB = -24f
+private const val INPUT_GAIN_MAX_DB = 12f
+
 @Composable
 private fun AudioControlsPanel(
     state: CameraUiState,
+    onInputGainChange: (Float) -> Unit,
     onEqGainChange: (Int, Float) -> Unit,
     onEqFreqChange: (Int, Float) -> Unit,
     onEqQChange: (Int, Float) -> Unit,
@@ -691,6 +718,24 @@ private fun AudioControlsPanel(
     ) {
         // xRun / overrun stats
         AudioStatsRow(state = state)
+
+        HorizontalDivider(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
+        )
+
+        // Input gain (record level) — first in the chain, so it comes first in the UI too
+        // (audio.pdf調査: set the level before shaping it). Asymmetric range biased toward
+        // attenuation — see CameraUiState.inputGainDb's doc for why.
+        ManualControlSlider(
+            label = "GAIN",
+            value = ((state.inputGainDb - INPUT_GAIN_MIN_DB) / (INPUT_GAIN_MAX_DB - INPUT_GAIN_MIN_DB))
+                .coerceIn(0f, 1f),
+            valueText = state.inputGainDisplayText,
+            onValueChange = { norm ->
+                onInputGainChange(INPUT_GAIN_MIN_DB + norm * (INPUT_GAIN_MAX_DB - INPUT_GAIN_MIN_DB))
+            },
+        )
 
         HorizontalDivider(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -763,8 +808,10 @@ private fun AudioStatsRow(state: CameraUiState) {
             .padding(horizontal = 16.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        StatChip(label = "PEAK", value = "%.1fdB".format(state.peakDb))
-        StatChip(label = "RMS", value = "%.1fdB".format(state.rmsDb))
+        // Louder of the two channels — a compact single figure for this debug-style row;
+        // the full per-channel breakdown is the StereoAudioMeter overlay on the preview.
+        StatChip(label = "PEAK", value = "%.1fdB".format(maxOf(state.peakDbL, state.peakDbR)))
+        StatChip(label = "RMS", value = "%.1fdB".format(maxOf(state.rmsDbL, state.rmsDbR)))
         StatChip(label = "XRUN", value = state.xrunCount.toString(), warn = state.xrunCount > 0)
         StatChip(label = "OVRN", value = state.ringBufferOverrunCount.toString(), warn = state.ringBufferOverrunCount > 0)
     }

@@ -30,9 +30,17 @@ class NativeEngineBridge : AutoCloseable {
     fun setEqBandParams(band: Int, freqHz: Float, q: Float, gainDb: Float) =
         nativeSetEqBandParams(handle, band, freqHz, q, gainDb)
 
-    fun peakDb(): Float = nativePeakDb(handle)
+    /**
+     * Manual record-level (input gain) control — see `dsp/InputGain.h`'s doc for what
+     * this is (a post-ADC digital gain, applied before the EQ/limiter) and its limits
+     * (cannot undo analog/mic-stage clipping).
+     */
+    fun setInputGainDb(gainDb: Float) = nativeSetInputGainDb(handle, gainDb)
 
-    fun rmsDb(): Float = nativeRmsDb(handle)
+    /** [channel]: 0 = left, 1 = right — see `dsp/PeakRmsMeter.h`'s doc for why L/R are tracked independently. */
+    fun peakDb(channel: Int): Float = nativePeakDb(handle, channel)
+
+    fun rmsDb(channel: Int): Float = nativeRmsDb(handle, channel)
 
     fun ringBufferOverrunCount(): Int = nativeRingBufferOverrunCount(handle)
 
@@ -80,8 +88,9 @@ class NativeEngineBridge : AutoCloseable {
     private external fun nativeInsertSilence(handle: Long, frameCount: Int)
     private external fun nativeSetMonitoringEnabled(handle: Long, enabled: Boolean, outputDeviceId: Int): String?
     private external fun nativeSetEqBandParams(handle: Long, band: Int, freqHz: Float, q: Float, gainDb: Float)
-    private external fun nativePeakDb(handle: Long): Float
-    private external fun nativeRmsDb(handle: Long): Float
+    private external fun nativeSetInputGainDb(handle: Long, gainDb: Float)
+    private external fun nativePeakDb(handle: Long, channel: Int): Float
+    private external fun nativeRmsDb(handle: Long, channel: Int): Float
     private external fun nativeRingBufferOverrunCount(handle: Long): Int
     private external fun nativeHardwareXRunCount(handle: Long): Int
     private external fun nativeGetInputTimestamp(handle: Long): LongArray?

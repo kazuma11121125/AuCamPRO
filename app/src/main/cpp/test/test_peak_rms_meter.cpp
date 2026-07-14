@@ -33,8 +33,8 @@ TEST(PeakRmsMeterTest, SineWaveConvergesToKnownRmsAndPeakDb) {
     const float expectedRmsDb = 20.0f * std::log10(kAmplitude / std::sqrt(2.0f));
     const float expectedPeakDb = 20.0f * std::log10(kAmplitude);
 
-    EXPECT_NEAR(meter.rmsDb(), expectedRmsDb, 0.5f);
-    EXPECT_NEAR(meter.peakDb(), expectedPeakDb, 0.5f);
+    EXPECT_NEAR(meter.rmsDb(0), expectedRmsDb, 0.5f);
+    EXPECT_NEAR(meter.peakDb(0), expectedPeakDb, 0.5f);
 }
 
 TEST(PeakRmsMeterTest, SilenceReadsAtOrBelowFloor) {
@@ -43,19 +43,49 @@ TEST(PeakRmsMeterTest, SilenceReadsAtOrBelowFloor) {
     for (int i = 0; i < 20; ++i) {
         meter.process(block.data(), block.size() / 2, 2);
     }
-    EXPECT_LE(meter.peakDb(), -99.0f);
-    EXPECT_LE(meter.rmsDb(), -99.0f);
+    EXPECT_LE(meter.peakDb(0), -99.0f);
+    EXPECT_LE(meter.rmsDb(0), -99.0f);
+    EXPECT_LE(meter.peakDb(1), -99.0f);
+    EXPECT_LE(meter.rmsDb(1), -99.0f);
 }
 
 TEST(PeakRmsMeterTest, PeakReleaseDecaysAfterTransientEnds) {
     PeakRmsMeter meter(48000.0, /*releaseSeconds=*/0.05f);
     std::vector<float> loud(480, 0.9f);  // 10ms burst at 48kHz
     meter.process(loud.data(), loud.size() / 2, 2);
-    const float peakAfterTransient = meter.peakDb();
+    const float peakAfterTransient = meter.peakDb(0);
 
     std::vector<float> silence(48000, 0.0f);  // 0.5s of silence at 48kHz stereo interleaved-equivalent count
     meter.process(silence.data(), silence.size() / 2, 2);
-    const float peakAfterRelease = meter.peakDb();
+    const float peakAfterRelease = meter.peakDb(0);
 
     EXPECT_LT(peakAfterRelease, peakAfterTransient - 20.0f) << "peak did not decay after the transient ended";
+}
+
+TEST(PeakRmsMeterTest, ChannelsAreTrackedIndependently) {
+    PeakRmsMeter meter(48000.0, /*releaseSeconds=*/0.05f, /*rmsWindowSeconds=*/0.05f);
+
+    // Interleaved stereo: left loud and constant, right silent — a real scenario (a
+    // performer far off-axis from one capsule) that a combined meter would hide.
+    std::vector<float> block;
+    for (int i = 0; i < 24000; ++i) {  // 0.5s at 48kHz
+        block.push_back(0.8f);  // left
+        block.push_back(0.0f);  // right
+    }
+    meter.process(block.data(), block.size() / 2, 2);
+
+    EXPECT_NEAR(meter.peakDb(0), 20.0f * std::log10(0.8f), 0.5f);
+    EXPECT_LE(meter.peakDb(1), -99.0f);
+    EXPECT_GT(meter.rmsDb(0), -10.0f);
+    EXPECT_LE(meter.rmsDb(1), -99.0f);
+}
+
+TEST(PeakRmsMeterTest, MonoProcessCallLeavesUnusedChannelAtFloor) {
+    PeakRmsMeter meter(48000.0);
+    std::vector<float> block(4096, 0.5f);
+    meter.process(block.data(), block.size(), /*channelCount=*/1);
+
+    EXPECT_GT(meter.peakDb(0), -99.0f);
+    EXPECT_LE(meter.peakDb(1), -99.0f);
+    EXPECT_LE(meter.rmsDb(1), -99.0f);
 }

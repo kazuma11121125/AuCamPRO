@@ -25,6 +25,7 @@ import com.procamera.recorder.ui.theme.OnSurfaceSecondary
 import com.procamera.recorder.ui.theme.SurfaceDark
 import com.procamera.recorder.ui.viewmodel.CameraControlViewModel
 import com.procamera.recorder.ui.viewmodel.CameraUiState
+import com.procamera.recorder.ui.viewmodel.FrameLineAspectRatio
 import com.procamera.recorder.ui.viewmodel.StorageLocation
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -115,6 +116,39 @@ fun SettingsBottomSheet(
                     )
                     Text(
                         text = label,
+                        color = if (isSelected) OnSurfacePrimary else OnSurfaceSecondary,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Frame-line composition guide — preview-only, does not crop the recorded
+            // file (see FrameLineAspectRatio's doc for why).
+            Text(
+                text = "構図ガイド (プレビューのみ・録画映像はクロップされません)",
+                color = OnSurfaceSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            FrameLineAspectRatio.entries.forEach { option ->
+                val isSelected = state.settings.frameLineAspectRatio == option
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { viewModel.setFrameLineAspectRatio(option) }
+                        .padding(vertical = 8.dp)
+                ) {
+                    RadioButton(
+                        selected = isSelected,
+                        onClick = null,
+                        colors = RadioButtonDefaults.colors(selectedColor = Amber)
+                    )
+                    Text(
+                        text = option.label,
                         color = if (isSelected) OnSurfacePrimary else OnSurfaceSecondary,
                         fontSize = 14.sp,
                         modifier = Modifier.padding(start = 8.dp)

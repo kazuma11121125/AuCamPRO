@@ -44,6 +44,7 @@ add_library(procamera_portable STATIC
     ${PROCAMERA_CPP_ROOT}/dsp/BiquadEq.cpp
     ${PROCAMERA_CPP_ROOT}/dsp/SafetyLimiter.cpp
     ${PROCAMERA_CPP_ROOT}/dsp/PeakRmsMeter.cpp
+    ${PROCAMERA_CPP_ROOT}/dsp/InputGain.cpp
 )
 target_include_directories(procamera_portable PUBLIC ${PROCAMERA_CPP_ROOT})
 target_compile_options(procamera_portable PUBLIC -Wall -Wextra)
@@ -63,6 +64,7 @@ add_executable(procamera_native_tests
     test_biquad.cpp
     test_safety_limiter.cpp
     test_peak_rms_meter.cpp
+    test_input_gain.cpp
 )
 target_link_libraries(procamera_native_tests PRIVATE procamera_portable GTest::gtest_main)
 

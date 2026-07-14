@@ -10,6 +10,7 @@
 #include "buffer/SpscRingBuffer.h"
 #include "common/Result.h"
 #include "dsp/BiquadEq.h"
+#include "dsp/InputGain.h"
 #include "dsp/PeakRmsMeter.h"
 #include "dsp/SafetyLimiter.h"
 
@@ -17,9 +18,9 @@ namespace procamera {
 
 // Owns the Oboe input stream (mic capture, always on while recording) and an optional
 // output stream (headphone monitor passthrough, §4.2). The input stream's audio callback
-// is the sole RT thread in this class: onAudioReady() runs the DSP chain (EQ -> safety
-// limiter -> meter) and pushes the result into a lock-free ring buffer that the (non-RT)
-// Audio Encoder thread drains from Kotlin. Every method other than onAudioReady() /
+// is the sole RT thread in this class: onAudioReady() runs the DSP chain (input gain ->
+// EQ -> safety limiter -> meter) and pushes the result into a lock-free ring buffer that
+// the (non-RT) Audio Encoder thread drains from Kotlin. Every method other than onAudioReady() /
 // onErrorAfterClose() runs on a non-RT caller (UI/coroutine thread via JNI) and may take
 // locks / allocate freely; onAudioReady() itself touches nothing but already-owned
 // objects and their RT-safe methods.
@@ -76,9 +77,15 @@ public:
     // UI/coroutine thread only.
     void setEqBandParams(int band, float freqHz, float q, float gainDb);
 
-    // Any thread (JNI pull accessors).
-    float peakDb() const { return meter_.peakDb(); }
-    float rmsDb() const { return meter_.rmsDb(); }
+    // UI/coroutine thread only. Manual record-level control (audio.pdf調査の§Layer1相当
+    // — InputPreset::Unprocessedで無効化したOSのAGCの代わりに、110-125dB SPLのような
+    // 大音量ライブの現場でユーザー自身がレベルを追い込むための唯一の手段)。
+    // See dsp/InputGain.h for what this can and cannot do.
+    void setInputGainDb(float gainDb) { inputGain_.setGainDb(gainDb); }
+
+    // Any thread (JNI pull accessors). channel: 0 = left, 1 = right.
+    float peakDb(int channel) const { return meter_.peakDb(channel); }
+    float rmsDb(int channel) const { return meter_.rmsDb(channel); }
     int32_t ringBufferOverrunCount() const { return ringBufferOverrunCount_.load(std::memory_order_relaxed); }
     int32_t hardwareXRunCount() const;
 
@@ -107,6 +114,7 @@ public:
 private:
     Result<std::shared_ptr<oboe::AudioStream>, std::string> openInputStreamLocked(int32_t deviceId);
 
+    InputGain inputGain_;
     ThreeBandEq eq_;
     SafetyLimiter limiter_;
     PeakRmsMeter meter_;
