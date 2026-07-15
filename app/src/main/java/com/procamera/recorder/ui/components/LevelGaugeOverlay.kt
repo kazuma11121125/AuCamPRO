@@ -15,13 +15,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.drawscope.rotate as drawRotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -82,6 +84,18 @@ private fun physicalRotationFrom(orientationDegrees: Int): Int = when (orientati
 fun LevelGaugeOverlay(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     var rollDegrees by remember { mutableFloatStateOf(0f) }
+    // Separate from the *value* (which is correct in all holds — see rollDegrees's own
+    // comment below): this app's window is locked to sensorLandscape, so turning the
+    // phone to portrait does NOT rotate the app's own content to match — the whole
+    // landscape-shaped UI, including this widget's fixed-size Canvas, stays exactly as
+    // drawn. **実機で発見(2026-07-15)**: real-device feedback confirmed rollDegrees itself
+    // reads correctly (0.0° when held level in portrait), but the bar still rendered
+    // vertically — because "horizontal in the app's own landscape-oriented drawing
+    // space" is not the same as "horizontal from the user's actual eyes" once they've
+    // turned the phone 90° relative to that fixed content. This tracks that mismatch so
+    // the whole widget (bar + label) can counter-rotate to stay legible from wherever
+    // the user is actually holding the phone.
+    var viewRotationDegrees by remember { mutableIntStateOf(0) }
 
     DisposableEffect(context) {
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -92,6 +106,16 @@ fun LevelGaugeOverlay(modifier: Modifier = Modifier) {
             override fun onOrientationChanged(orientation: Int) {
                 if (orientation == ORIENTATION_UNKNOWN) return
                 physicalRotation = physicalRotationFrom(orientation)
+                // 実機で発見: the bar itself has 180° rotational symmetry (a horizontal
+                // line rotated 180° is still a horizontal line), so getting this sign
+                // backwards still LOOKED correct for the bar — only the "+0.1°" text
+                // label (no 180° symmetry) revealed the sign was wrong (read upside
+                // down). Confirmed correct on real hardware with this sign.
+                viewRotationDegrees = when (physicalRotation) {
+                    Surface.ROTATION_0 -> -90
+                    Surface.ROTATION_180 -> 90
+                    else -> 0
+                }
             }
         }
 
@@ -142,7 +166,7 @@ fun LevelGaugeOverlay(modifier: Modifier = Modifier) {
     val lineColor = if (isLevel) MeterGreen else Color.White
 
     Column(
-        modifier = modifier,
+        modifier = modifier.rotate(viewRotationDegrees.toFloat()),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Canvas(modifier = Modifier.size(width = 120.dp, height = 24.dp)) {
@@ -154,7 +178,7 @@ fun LevelGaugeOverlay(modifier: Modifier = Modifier) {
                 end = Offset(size.width / 2f, size.height / 2f + 6.dp.toPx()),
                 strokeWidth = 2.dp.toPx(),
             )
-            rotate(degrees = -rollDegrees, pivot = center) {
+            drawRotate(degrees = -rollDegrees, pivot = center) {
                 drawLine(
                     color = lineColor,
                     start = Offset(0f, size.height / 2f),
