@@ -202,6 +202,15 @@ class RecordingPipeline(private val context: Context) {
     private var focusController: com.procamera.recorder.camera.FocusController? = null
     var onTapToFocusLocked: ((focusDistanceDiopters: Float) -> Unit)? = null
 
+    // §フォーカス位置表示 — see FocusController.onFocusIndicatorChanged's doc. Fires once
+    // per state transition (Scanning at tap time, then Locked/Failed once the scan
+    // resolves) so the UI can draw/animate a focus reticle.
+    var onFocusIndicatorChanged: ((
+        normalizedX: Float,
+        normalizedY: Float,
+        state: com.procamera.recorder.camera.FocusController.FocusIndicatorState,
+    ) -> Unit)? = null
+
     // ──────────────────────────────────────────────────────────────────────────────
     // Encoder / muxer (only alive during RECORDING)
     // ──────────────────────────────────────────────────────────────────────────────
@@ -310,6 +319,9 @@ class RecordingPipeline(private val context: Context) {
                 },
                 onFocusLocked = { distance ->
                     Handler(Looper.getMainLooper()).post { onTapToFocusLocked?.invoke(distance) }
+                },
+                onFocusIndicatorChanged = { x, y, indicatorState ->
+                    Handler(Looper.getMainLooper()).post { onFocusIndicatorChanged?.invoke(x, y, indicatorState) }
                 },
             )
 

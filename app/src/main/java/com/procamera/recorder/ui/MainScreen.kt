@@ -71,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.procamera.recorder.ui.components.FocusReticleOverlay
 import com.procamera.recorder.ui.components.FrameLineOverlay
 import com.procamera.recorder.ui.components.HistogramOverlay
 import com.procamera.recorder.ui.components.LevelGaugeOverlay
@@ -190,6 +191,19 @@ fun MainScreen(
             state.settings.frameLineAspectRatio.ratio?.let { ratio ->
                 FrameLineOverlay(
                     targetAspectRatio = ratio,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .aspectRatio(previewAspectRatio, matchHeightConstraintsFirst = isLandscape),
+                )
+            }
+
+            // Focus reticle (§フォーカス位置表示) — same coordinate contract as
+            // FrameLineOverlay above (must resolve to the exact same rect as
+            // PreviewSurfaceView, hence the identical modifier chain), since
+            // state.focusIndicator's normalizedX/Y are relative to that same surface.
+            state.focusIndicator?.let { indicator ->
+                FocusReticleOverlay(
+                    indicator = indicator,
                     modifier = Modifier
                         .fillMaxSize()
                         .aspectRatio(previewAspectRatio, matchHeightConstraintsFirst = isLandscape),
@@ -564,6 +578,20 @@ private fun GalleryThumbnailButton(uri: Uri?, isVideo: Boolean, modifier: Modifi
                     // when their own "last shot" thumbnail has nothing to point at).
                     Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
                 }
+                // 実機で発見: this device has both Google Photos and "Photos Go" installed
+                // (confirmed via `dumpsys package resolver-table` — both register for
+                // `vnd.android.cursor.dir/image` VIEW), so the plain implicit Intent shows
+                // a chooser on *every* tap — Android's "Always" remembered-default doesn't
+                // reliably suppress it for this content-URI VIEW pattern (real-device
+                // feedback: picking the same app every time still re-prompted). Resolving
+                // to a specific package up front skips the chooser entirely when a known
+                // gallery app is present, falling back to the system chooser only if
+                // neither is installed.
+                val targetPackage = listOf("com.google.android.apps.photos", "com.sonymobile.album")
+                    .firstOrNull { pkg ->
+                        context.packageManager.resolveActivity(Intent(intent).setPackage(pkg), 0) != null
+                    }
+                if (targetPackage != null) intent.setPackage(targetPackage)
                 context.startActivity(intent)
             },
         contentAlignment = Alignment.Center,

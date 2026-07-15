@@ -146,7 +146,25 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         pipeline.onMediaCaptured = { uri, isVideo ->
             _uiState.update { it.copy(lastCapturedUri = uri, lastCapturedIsVideo = isVideo) }
         }
+        // §フォーカス位置表示: shows immediately at Scanning, then auto-hides a couple
+        // seconds after the scan resolves (Locked/Failed) — a real camera's focus
+        // reticle doesn't stay on screen forever once it's told you what you need to
+        // know. Re-tapping while the previous reticle is still fading cancels the old
+        // timer via the job reassignment below, restarting the countdown for the new tap
+        // rather than having the old timer race-clear the new reticle out from under it.
+        pipeline.onFocusIndicatorChanged = { x, y, indicatorState ->
+            _uiState.update { it.copy(focusIndicator = FocusIndicator(x, y, indicatorState)) }
+            focusIndicatorHideJob?.cancel()
+            if (indicatorState != com.procamera.recorder.camera.FocusController.FocusIndicatorState.Scanning) {
+                focusIndicatorHideJob = viewModelScope.launch {
+                    delay(1500L)
+                    _uiState.update { it.copy(focusIndicator = null) }
+                }
+            }
+        }
     }
+
+    private var focusIndicatorHideJob: Job? = null
 
     private var meterJob: Job? = null
     private var timerJob: Job? = null

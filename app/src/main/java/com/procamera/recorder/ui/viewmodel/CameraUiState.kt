@@ -3,8 +3,27 @@ package com.procamera.recorder.ui.viewmodel
 import android.net.Uri
 import com.procamera.recorder.camera.CameraCapabilityInspector
 import com.procamera.recorder.camera.CaptureRangeClamper
+import com.procamera.recorder.camera.FocusController
 import com.procamera.recorder.pipeline.RecordingPipeline
 import java.io.File
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Focus reticle (§フォーカス位置表示)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Where the camera is currently focusing, for MainScreen's focus reticle overlay — set
+ * by [CameraControlViewModel]'s [RecordingPipeline.onFocusIndicatorChanged] wiring, and
+ * auto-cleared a couple seconds after reaching [FocusController.FocusIndicatorState.Locked]/
+ * [FocusController.FocusIndicatorState.Failed] (see that wiring's own doc for the timer).
+ * [normalizedX]/[normalizedY] are [0,1] within the rendered preview surface, matching
+ * [RecordingPipeline.requestTapToFocus]'s coordinate contract.
+ */
+data class FocusIndicator(
+    val normalizedX: Float,
+    val normalizedY: Float,
+    val state: FocusController.FocusIndicatorState,
+)
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Recording state
@@ -270,6 +289,9 @@ data class CameraUiState(
     // MediaStore on launch wasn't worth the complexity for a nice-to-have thumbnail).
     val lastCapturedUri: android.net.Uri? = null,
     val lastCapturedIsVideo: Boolean = false,
+
+    // ── Focus reticle (§FocusIndicator's doc) ────────────────────────────────
+    val focusIndicator: FocusIndicator? = null,
 ) {
     val isRecording: Boolean get() = recordingState == RecordingUiState.Recording
     val isPreviewing: Boolean get() = recordingState == RecordingUiState.Previewing
