@@ -52,6 +52,16 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     private val _uiState = MutableStateFlow(CameraUiState())
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
 
+    // Separate from [_uiState] — see [AudioMeterUiState]'s doc for why the ~30Hz meter
+    // churn must not live on the same object the sidebar/tabs recompose against.
+    private val _meterState = MutableStateFlow(AudioMeterUiState())
+    val meterState: StateFlow<AudioMeterUiState> = _meterState.asStateFlow()
+
+    // Same reasoning as [_meterState] — histogram samples arrive at close to preview
+    // frame rate, so this must not live on [_uiState] either.
+    private val _histogramBins = MutableStateFlow<FloatArray?>(null)
+    val histogramBins: StateFlow<FloatArray?> = _histogramBins.asStateFlow()
+
     private var lastAutoKelvin: Double? = null
     private var lastAutoGains: android.hardware.camera2.params.RggbChannelVector? = null
     private var lastAutoFocus: Float? = null
@@ -64,17 +74,17 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     init {
         // Debounced auto-save: writes settle ~800ms after the last *persistence-relevant*
         // change, not on every intermediate value during a slider drag
-        // (UserPreferencesStore.save's doc). Critically, this maps down to a small
-        // equality-comparable snapshot BEFORE debounce()/distinctUntilChanged() — mapping
-        // straight off the raw `uiState` flow doesn't work, because that flow also carries
-        // the audio meter's peakDb/rmsDb fields, which startMeterPolling() updates every
-        // ~33ms for as long as preview is up (i.e. almost always). debounce() only fires
-        // after a quiet gap with no new emissions; against the raw flow, the meter's
-        // constant churn means that gap never happens, so the collector never fires at all
-        // past its first tick (confirmed on real hardware: the saved prefs file only ever
-        // contained CameraUiState()'s plain defaults, frozen from the single emission before
-        // the meter starts). Filtering to only the fields this store actually persists
-        // means the meter's own updates no longer count as "activity" for debounce purposes.
+        // (UserPreferencesStore.save's doc). Maps down to a small equality-comparable
+        // snapshot BEFORE debounce()/distinctUntilChanged() rather than mapping straight
+        // off the raw `uiState` flow — `uiState` no longer carries the audio meter's
+        // ~30Hz churn (see [AudioMeterUiState]'s doc for why that now lives in its own
+        // flow), but this explicit allowlist is still worth keeping: it's a single place
+        // that documents exactly which fields are meant to survive a restart, independent
+        // of whatever telemetry/derived fields `CameraUiState` grows next (real-hardware
+        // history: this collector previously went silent entirely — see git history for
+        // the meter-churn incident this snapshot was originally built to fix — when a
+        // frequently-changing field lived on the raw flow and debounce()'s quiet-gap
+        // requirement was never met).
         // drop(1): skip the initial CameraUiState() default snapshot — nothing to persist
         // yet, and it would otherwise briefly overwrite a real saved value with the default
         // if this collector's first tick raced restorePersistedSettings's own writes.
@@ -112,7 +122,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         pipeline.onHistogramUpdated = { bins ->
-            _uiState.update { it.copy(histogramBins = bins) }
+            _histogramBins.value = bins
         }
         pipeline.onAutoFocusMeasured = { focus ->
             lastAutoFocus = focus
@@ -357,11 +367,10 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                                 outputDirectory = event.outputDirectory,
                                 recordingElapsedMs = 0L,
                                 currentSegment = 0,
-                                xrunCount = 0,
-                                ringBufferOverrunCount = 0,
                                 errorMessage = null,
                             )
                         }
+                        _meterState.update { it.copy(xrunCount = 0, ringBufferOverrunCount = 0) }
                         startRecordingJobs()
                     }
                     is RecordingPipeline.Event.Failed -> {
@@ -373,7 +382,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     RecordingPipeline.Event.Stopped -> {}
                     is RecordingPipeline.Event.Stats -> {
-                        _uiState.update { it.copy(xrunCount = event.xrunCount, ringBufferOverrunCount = event.ringBufferOverrunCount) }
+                        _meterState.update { it.copy(xrunCount = event.xrunCount, ringBufferOverrunCount = event.ringBufferOverrunCount) }
                     }
                 }
             }
@@ -394,6 +403,10 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                 _uiState.update { state ->
                     state.copy(
                         recordingState = if (caps != null) RecordingUiState.Previewing else RecordingUiState.Idle,
+                    )
+                }
+                _meterState.update {
+                    it.copy(
                         peakDbL = -120f, peakDbR = -120f, rmsDbL = -120f, rmsDbR = -120f,
                         isClippingHeldL = false, isClippingHeldR = false,
                     )
@@ -649,7 +662,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                 if (peakR > CLIPPING_THRESHOLD_DB) lastClippingDetectedMsR = nowMs
                 val clippingHeldL = (nowMs - lastClippingDetectedMsL) < clippingHoldDurationMs
                 val clippingHeldR = (nowMs - lastClippingDetectedMsR) < clippingHoldDurationMs
-                _uiState.update {
+                _meterState.update {
                     it.copy(
                         peakDbL = peakL, peakDbR = peakR, rmsDbL = rmsL, rmsDbR = rmsR,
                         isClippingHeldL = clippingHeldL, isClippingHeldR = clippingHeldR,
@@ -664,7 +677,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         meterJob = null
         lastClippingDetectedMsL = 0L
         lastClippingDetectedMsR = 0L
-        _uiState.update {
+        _meterState.update {
             it.copy(
                 peakDbL = -120f, peakDbR = -120f, rmsDbL = -120f, rmsDbR = -120f,
                 isClippingHeldL = false, isClippingHeldR = false,

@@ -193,31 +193,30 @@ fun MainScreen(
             // state.showControls) so levels stay readable while adjusting camera controls,
             // matching a field production monitor's audio bridge. Two independent bars
             // (L/R) since the mic input is stereo and one side can clip while the other
-            // doesn't (see CameraUiState's per-channel fields / dsp/PeakRmsMeter.h).
-            Row(
+            // doesn't (see AudioMeterUiState's per-channel fields / dsp/PeakRmsMeter.h).
+            //
+            // Collects viewModel.meterState itself (rather than receiving values read from
+            // `state` here) so the ~30Hz meter churn only recomposes this one small host,
+            // not this whole Box's content lambda — see AudioMeterUiState's doc.
+            AudioMeterHost(
+                viewModel = viewModel,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .statusBarsPadding()
                     .padding(start = 8.dp, top = 56.dp)
                     .height(150.dp),
-            ) {
-                StereoAudioMeter(
-                    peakDbL = state.peakDbL,
-                    peakDbR = state.peakDbR,
-                    rmsDbL = state.rmsDbL,
-                    rmsDbR = state.rmsDbR,
-                    isClippingHeldL = state.isClippingHeldL,
-                    isClippingHeldR = state.isClippingHeldR,
-                )
-            }
+            )
 
             // Histogram — bottom-left: the one remaining corner clear of the audio meter
             // (top-left), level gauge (center), control sidebar (right), and REC status
             // (bottom-center). Always visible (not gated on state.showControls) to match
             // the other measurement overlays, though it stops updating once a recording
             // starts (self-hides via the null check — see HistogramOverlay's doc).
-            HistogramOverlay(
-                bins = state.histogramBins,
+            //
+            // Collects viewModel.histogramBins itself for the same recomposition-isolation
+            // reason as AudioMeterHost above.
+            HistogramHost(
+                viewModel = viewModel,
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .navigationBarsPadding()
@@ -458,6 +457,34 @@ private fun StatusOverlay(
 }
 
 /**
+ * Collects [CameraControlViewModel.meterState] itself and feeds [StereoAudioMeter] — see
+ * that flow's doc (AudioMeterUiState) for why this state read must happen *inside* this
+ * small leaf composable rather than in the caller (which would just move the ~30Hz
+ * recomposition cost up into the caller's own scope, defeating the point).
+ */
+@Composable
+private fun AudioMeterHost(viewModel: CameraControlViewModel, modifier: Modifier = Modifier) {
+    val meter by viewModel.meterState.collectAsStateWithLifecycle()
+    Row(modifier = modifier) {
+        StereoAudioMeter(
+            peakDbL = meter.peakDbL,
+            peakDbR = meter.peakDbR,
+            rmsDbL = meter.rmsDbL,
+            rmsDbR = meter.rmsDbR,
+            isClippingHeldL = meter.isClippingHeldL,
+            isClippingHeldR = meter.isClippingHeldR,
+        )
+    }
+}
+
+/** Same reasoning as [AudioMeterHost], for [CameraControlViewModel.histogramBins]. */
+@Composable
+private fun HistogramHost(viewModel: CameraControlViewModel, modifier: Modifier = Modifier) {
+    val bins by viewModel.histogramBins.collectAsStateWithLifecycle()
+    HistogramOverlay(bins = bins, modifier = modifier)
+}
+
+/**
  * PHOTO ⇄ VIDEO segmented toggle (§静止画/動画モード切り替え, Photo Pro/Video Pro方式) —
  * see the call site's doc for why this replaces always showing both a still-capture
  * button and a REC indicator.
@@ -594,6 +621,7 @@ private fun ControlPanel(
 
                 ControlPanel.Audio -> AudioControlsPanel(
                     state = state,
+                    viewModel = viewModel,
                     onInputGainChange = viewModel::setInputGainDb,
                     onEqGainChange = viewModel::setEqBandGain,
                     onEqFreqChange = viewModel::setEqBandFreq,
@@ -884,6 +912,7 @@ private const val INPUT_GAIN_MAX_DB = 12f
 @Composable
 private fun AudioControlsPanel(
     state: CameraUiState,
+    viewModel: CameraControlViewModel,
     onInputGainChange: (Float) -> Unit,
     onEqGainChange: (Int, Float) -> Unit,
     onEqFreqChange: (Int, Float) -> Unit,
@@ -895,8 +924,9 @@ private fun AudioControlsPanel(
             .fillMaxWidth()
             .padding(vertical = 8.dp),
     ) {
-        // xRun / overrun stats
-        AudioStatsRow(state = state)
+        // xRun / overrun stats — collects viewModel.meterState itself (see AudioStatsRow's
+        // doc) so this ~30Hz churn only recomposes this one row, not the EQ sliders below.
+        AudioStatsRow(viewModel = viewModel)
 
         HorizontalDivider(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -979,8 +1009,11 @@ private fun AudioControlsPanel(
     }
 }
 
+/** Collects [CameraControlViewModel.meterState] itself — see [AudioMeterHost]'s doc for
+ * why (same reasoning, different leaf). */
 @Composable
-private fun AudioStatsRow(state: CameraUiState) {
+private fun AudioStatsRow(viewModel: CameraControlViewModel) {
+    val meter by viewModel.meterState.collectAsStateWithLifecycle()
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -989,10 +1022,10 @@ private fun AudioStatsRow(state: CameraUiState) {
     ) {
         // Louder of the two channels — a compact single figure for this debug-style row;
         // the full per-channel breakdown is the StereoAudioMeter overlay on the preview.
-        StatChip(label = "PEAK", value = "%.1fdB".format(maxOf(state.peakDbL, state.peakDbR)))
-        StatChip(label = "RMS", value = "%.1fdB".format(maxOf(state.rmsDbL, state.rmsDbR)))
-        StatChip(label = "XRUN", value = state.xrunCount.toString(), warn = state.xrunCount > 0)
-        StatChip(label = "OVRN", value = state.ringBufferOverrunCount.toString(), warn = state.ringBufferOverrunCount > 0)
+        StatChip(label = "PEAK", value = "%.1fdB".format(maxOf(meter.peakDbL, meter.peakDbR)))
+        StatChip(label = "RMS", value = "%.1fdB".format(maxOf(meter.rmsDbL, meter.rmsDbR)))
+        StatChip(label = "XRUN", value = meter.xrunCount.toString(), warn = meter.xrunCount > 0)
+        StatChip(label = "OVRN", value = meter.ringBufferOverrunCount.toString(), warn = meter.ringBufferOverrunCount > 0)
     }
 }
 

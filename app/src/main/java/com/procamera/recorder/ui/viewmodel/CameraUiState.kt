@@ -42,6 +42,40 @@ data class EqBandState(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Audio meter (separate from CameraUiState — see doc below)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-channel peak/RMS + xrun/overrun stats, updated at ~30Hz by
+ * [CameraControlViewModel.startMeterPolling] for as long as preview is up.
+ *
+ * Deliberately a *separate* StateFlow ([CameraControlViewModel.meterState]) rather than
+ * fields on [CameraUiState]: composables that take the whole `CameraUiState` as a
+ * parameter (the control sidebar, its tabs, the REC indicator) only skip recomposition
+ * when Compose's structural-equality check on that *whole object* passes — when these
+ * fields lived on `CameraUiState`, their ~30Hz churn meant that check failed on every
+ * tick, forcing the entire sidebar tree (every slider, both tabs) to fully recompose 30
+ * times a second regardless of which tab was open or what the user was actually looking
+ * at (confirmed by the user reporting visible preview stutter with no device heat to
+ * explain it — a symptom of main-thread contention, not thermal throttling). Isolating
+ * this into its own flow means only the few small composables that actually read it
+ * (the on-preview meter widget, the AUDIO tab's stats row) recompose on each tick; see
+ * [com.procamera.recorder.ui.MainScreen]'s `AudioMeterHost`/`AudioStatsRow` for how they
+ * collect this flow locally rather than receiving it as a parameter from further up the
+ * tree, which would just reintroduce the same problem one level higher.
+ */
+data class AudioMeterUiState(
+    val peakDbL: Float = -120f,
+    val peakDbR: Float = -120f,
+    val rmsDbL: Float = -120f,
+    val rmsDbR: Float = -120f,
+    val isClippingHeldL: Boolean = false,
+    val isClippingHeldR: Boolean = false,
+    val xrunCount: Int = 0,
+    val ringBufferOverrunCount: Int = 0,
+)
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Control panel tab
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -181,17 +215,8 @@ data class CameraUiState(
     val zoomRatio: Float = 1.0f,
     val maxZoomRatio: Float = 1.0f,
 
-    // ── Audio meter (independent per channel — see dsp/PeakRmsMeter.h) ─────────
-    val peakDbL: Float = -120f,
-    val peakDbR: Float = -120f,
-    val rmsDbL: Float = -120f,
-    val rmsDbR: Float = -120f,
-    val isClippingHeldL: Boolean = false,
-    val isClippingHeldR: Boolean = false,
-
-    // ── Audio status ─────────────────────────────────────────────────────────
-    val xrunCount: Int = 0,
-    val ringBufferOverrunCount: Int = 0,
+    // ── Audio status (monitoringEnabled only — meter/xrun live in [AudioMeterUiState],
+    // a separate StateFlow; see that class's doc for why) ──────────────────────
     val monitoringEnabled: Boolean = false,
 
     // ── Input gain (record level) ───────────────────────────────────────────
@@ -203,11 +228,6 @@ data class CameraUiState(
 
     // ── EQ ───────────────────────────────────────────────────────────────────
     val eqBands: List<EqBandState> = EqBandState.defaults(),
-
-    // ── Histogram (輝度分布グラフ, §UIアシスト) ──────────────────────────────────
-    // Null until the first sample arrives (preview-only — see LuminanceHistogramReader's
-    // doc for why it's absent while a recording is in progress).
-    val histogramBins: FloatArray? = null,
 
     // ── Storage / performance ─────────────────────────────────────────────────
     val storageRemainingSeconds: Long = Long.MAX_VALUE,
