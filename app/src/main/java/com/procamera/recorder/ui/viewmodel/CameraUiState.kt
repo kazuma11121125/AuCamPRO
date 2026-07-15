@@ -135,7 +135,12 @@ sealed interface StorageLocation {
 enum class FrameLineAspectRatio(val ratio: Float?, val label: String) {
     Off(null, "オフ"),
     Square(1f, "1:1"),
+    // 3:2 — the 35mmスチル写真(フィルム/多くのフルサイズ・APS-Cセンサー)の標準比率。動画では
+    // まず出てこないが静止画構図では最も一般的な比率のひとつなので、動画寄りの4:3/16:9/9:16と
+    // 並べて追加。
+    ThreeTwo(3f / 2f, "3:2"),
     Classic(4f / 3f, "4:3"),
+    Widescreen(16f / 9f, "16:9"),
     Portrait(9f / 16f, "9:16"),
 }
 
