@@ -132,6 +132,17 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+        // Long-press-to-focus (§4.1) converged/timed-out — switch the UI to MF at the
+        // resulting distance, mirroring what FocusController already locked the live
+        // capture session to (see RequestSubmitter's doc for why that lock already took
+        // effect before this callback fires — this call is UI-display sync, not a second
+        // camera-facing write, though re-deriving CameraParams from the just-updated state
+        // and pushing it is cheap/idempotent so it's included for consistency with
+        // setFocusDistance/setAfAuto's own pattern).
+        pipeline.onTapToFocusLocked = { distance ->
+            _uiState.update { it.copy(focusDistanceDiopters = distance, afAuto = false) }
+            pipeline.updateCameraParams(_uiState.value.toCameraParams())
+        }
     }
 
     private var meterJob: Job? = null
@@ -438,6 +449,32 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     @Suppress("MissingPermission") // only reachable once MainScreen (and PermissionGate) is composed
     fun capturePhoto() {
         pipeline.capturePhoto()
+    }
+
+    /**
+     * Long-press-to-focus on the preview (§AF/MFモード, §4.1) — MainScreen's preview
+     * gesture handler calls this on a long-press (not a plain tap, which already toggles
+     * the control sidebar — see that call site's doc). [normalizedX]/[normalizedY] must
+     * be [0,1] coordinates within the *rendered preview Surface's* own bounds, not the
+     * enclosing layout box — see [RecordingPipeline.requestTapToFocus]'s doc.
+     */
+    fun onPreviewLongPressToFocus(normalizedX: Float, normalizedY: Float) {
+        pipeline.requestTapToFocus(normalizedX, normalizedY)
+    }
+
+    /**
+     * Shutter half-press equivalent (§AF/MFモード) — a touchscreen shutter button has no
+     * real two-stage press, so [MainScreen]'s Photo-mode shutter triggers this on
+     * `ACTION_DOWN` (before [capturePhoto] fires on release), mirroring a physical
+     * camera's half-press-to-focus-then-fully-press-to-shoot gesture. Focuses at frame
+     * center — this app has no "last selected AF point" concept outside of an explicit
+     * long-press, and center is the same default a fully-auto point-and-shoot camera
+     * uses. No-op outside Photo mode (Video mode's shutter is the REC indicator, which
+     * doesn't have a press-and-hold gesture to hang this off).
+     */
+    fun onShutterHalfPress() {
+        if (_uiState.value.captureMode != CaptureMode.Photo) return
+        pipeline.requestTapToFocus(0.5f, 0.5f)
     }
 
     /** Switches which action the shutter performs (§CaptureMode's doc). Disallowed

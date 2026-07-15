@@ -3,12 +3,14 @@ package com.procamera.recorder.ui.components
 import android.Manifest
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.procamera.recorder.ui.viewmodel.CameraControlViewModel
@@ -46,6 +48,16 @@ import com.procamera.recorder.ui.viewmodel.CameraControlViewModel
  *   (correctly-shaped) layout box. Must be set before [SurfaceHolder.Callback.surfaceCreated]
  *   hands the surface to Camera2, so this take effect on the very first frame.
  * @param modifier Modifier for the outer layout.
+ * @param onTap Plain tap (short press) on the preview — MainScreen wires this to
+ *   [CameraControlViewModel.toggleControls]. Combined with [onLongPressToFocus] in a
+ *   single `detectTapGestures` call (rather than a separate `Modifier.clickable`
+ *   elsewhere) so the two gestures can't race/double-fire against each other.
+ * @param onLongPressToFocus Long-press-to-focus (§AF/MFモード) — [normalizedX]/
+ *   [normalizedY] are [0,1] coordinates within *this composable's own rendered bounds*
+ *   (the `PointerInputScope.size` this gesture detector sees, which is exactly the
+ *   aspect-ratio-constrained `SurfaceView`'s box, not the wider outer preview area it
+ *   may sit inside) — see [com.procamera.recorder.camera.TapToMeteringRegion]'s doc for
+ *   why that's the contract the receiving end expects.
  */
 @androidx.annotation.RequiresPermission(Manifest.permission.CAMERA)
 @Composable
@@ -55,6 +67,8 @@ fun PreviewSurfaceView(
     aspectRatio: Float = 9f / 16f, // portrait phone with landscape-sensor camera (16:9 → 9:16)
     bufferWidth: Int = 1080,
     bufferHeight: Int = 1920,
+    onTap: () -> Unit = {},
+    onLongPressToFocus: (normalizedX: Float, normalizedY: Float) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
 
@@ -96,6 +110,14 @@ fun PreviewSurfaceView(
     AndroidView(
         factory = { surfaceView },
         modifier = modifier
-            .aspectRatio(aspectRatio, matchHeightConstraintsFirst = isLandscape),
+            .aspectRatio(aspectRatio, matchHeightConstraintsFirst = isLandscape)
+            .pointerInput(onTap, onLongPressToFocus) {
+                detectTapGestures(
+                    onTap = { onTap() },
+                    onLongPress = { offset ->
+                        onLongPressToFocus(offset.x / size.width, offset.y / size.height)
+                    },
+                )
+            },
     )
 }

@@ -12,6 +12,7 @@ import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.Log
 import android.view.Surface
 import androidx.annotation.RequiresPermission
 import java.util.concurrent.Executor
@@ -34,6 +35,10 @@ import kotlinx.coroutines.suspendCancellableCoroutine
  *   from each CaptureResult without coupling it to this class directly.
  */
 class CameraSessionController(private val cameraManager: CameraManager) {
+
+    private companion object {
+        const val TAG = "CameraSessionController"
+    }
 
     /** Per-frame result listener for FocusController integration. */
     fun interface CaptureResultListener {
@@ -114,6 +119,20 @@ class CameraSessionController(private val cameraManager: CameraManager) {
      * `setRepeatingRequest` is posted to [callbackHandler] implicitly via the Camera2 API.
      *
      * No-op if no session is active (e.g. called before [startRepeating] or after [stop]).
+     *
+     * **実機で発見**: [device]/[session] being non-null here is *not* a guarantee the
+     * underlying `CameraDevice` is still usable — Camera2 can close/invalidate it
+     * out-of-band (another app taking the camera, the OS reclaiming it, or this class's
+     * own [stop] running on another thread between this method's null-check and its
+     * actual use) independently of this class clearing its own [device]/[session] fields,
+     * which only happens synchronously inside [stop] itself. Confirmed on real hardware
+     * via [submitSingleRequest] (identical hazard, same fields): a long-press-to-focus
+     * gesture landing right as the session was torn down crashed the whole app with
+     * `IllegalStateException: CameraDevice was already closed` from inside
+     * `createCaptureRequest`. Swallowing it here is correct, not just convenient — the
+     * caller (a UI gesture or a slider drag) has no useful recovery action for "the
+     * session died out from under this specific request," and the *next* successful
+     * [startRepeating] already re-establishes a working session regardless.
      */
     fun updateCaptureParams(params: CameraParams) {
         val currentSession = session ?: return
@@ -121,11 +140,15 @@ class CameraSessionController(private val cameraManager: CameraManager) {
         val factory = activeRequestFactory ?: return
 
         activeParams = params
-        currentSession.setRepeatingRequest(
-            buildRequest(currentDevice, factory, params),
-            makeCaptureCallback(),
-            callbackHandler,
-        )
+        try {
+            currentSession.setRepeatingRequest(
+                buildRequest(currentDevice, factory, params),
+                makeCaptureCallback(),
+                callbackHandler,
+            )
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "updateCaptureParams: session/device closed mid-call, ignoring", e)
+        }
     }
 
     /**
@@ -141,6 +164,12 @@ class CameraSessionController(private val cameraManager: CameraManager) {
      * stills-specific capture-request key instead of a container-level hint.
      *
      * No-op if no session is active.
+     *
+     * **実機で発見**: same hazard as [updateCaptureParams]'s doc — [device] being non-null
+     * here does not guarantee it is still open. Confirmed on real hardware: a plain photo
+     * capture tap crashed the whole app with `IllegalStateException: CameraDevice was
+     * already closed` from inside `createCaptureRequest` when the session had been torn
+     * down (e.g. screen lock) between this method's null-check and its use.
      */
     @RequiresPermission(Manifest.permission.CAMERA)
     fun capturePhoto(
@@ -151,14 +180,18 @@ class CameraSessionController(private val cameraManager: CameraManager) {
     ) {
         val currentDevice = device ?: return
         val currentSession = session ?: return
-        val builder = currentDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-        builder.addTarget(jpegSurface)
-        requestFactory.applyManualExposure(builder, params.iso, params.exposureTimeNanos, params.fps)
-        requestFactory.applyFocus(builder, params.focusDistanceDiopters, params.afAuto)
-        requestFactory.applyWhiteBalance(builder, params)
-        requestFactory.applyZoom(builder, params.zoomRatio)
-        builder.set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
-        currentSession.capture(builder.build(), null, callbackHandler)
+        try {
+            val builder = currentDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            builder.addTarget(jpegSurface)
+            requestFactory.applyManualExposure(builder, params.iso, params.exposureTimeNanos, params.fps)
+            requestFactory.applyFocus(builder, params.focusDistanceDiopters, params.afAuto)
+            requestFactory.applyWhiteBalance(builder, params)
+            requestFactory.applyZoom(builder, params.zoomRatio)
+            builder.set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+            currentSession.capture(builder.build(), null, callbackHandler)
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "capturePhoto: session/device closed mid-call, ignoring", e)
+        }
     }
 
     /** Closes the session and device; does not stop the callback thread — see [release]. */
@@ -190,14 +223,56 @@ class CameraSessionController(private val cameraManager: CameraManager) {
         device: CameraDevice,
         factory: ManualCaptureRequestFactory,
         params: CameraParams,
-    ): CaptureRequest {
+    ): CaptureRequest = buildRequestBuilder(device, factory, params).build()
+
+    private fun buildRequestBuilder(
+        device: CameraDevice,
+        factory: ManualCaptureRequestFactory,
+        params: CameraParams,
+    ): CaptureRequest.Builder {
         val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
         activeSurfaces.forEach { builder.addTarget(it) }
         factory.applyManualExposure(builder, params.iso, params.exposureTimeNanos, params.fps)
         factory.applyFocus(builder, params.focusDistanceDiopters, params.afAuto)
         factory.applyWhiteBalance(builder, params)
         factory.applyZoom(builder, params.zoomRatio)
-        return builder.build()
+        return builder
+    }
+
+    /**
+     * Rebuilds the repeating request from the currently active params/factory (same base as
+     * [updateCaptureParams]), then lets [configure] override specific keys on top — the seam
+     * [FocusController] uses (§4.1 tap-to-focus) to inject `CONTROL_AF_MODE`/
+     * `CONTROL_AF_REGIONS`/`CONTROL_AF_TRIGGER` for a scan, and later to lock focus at the
+     * converged distance.
+     *
+     * **Why this updates the *repeating* request rather than firing one isolated
+     * `capture()`**: `AF_TRIGGER_START` is a self-resetting flag — the HAL treats it as
+     * "start a scan" for one frame even when the request object carrying it is the one
+     * `setRepeatingRequest` keeps reusing for every subsequent frame (this is standard
+     * Camera2 behavior, not specific to this app) — but `CONTROL_AF_MODE` is *not*
+     * self-resetting: if only a single one-shot `capture()` carried `AF_MODE_AUTO` while
+     * the repeating request kept flowing with the previous `AF_MODE_OFF`, the very next
+     * repeating-request frame would immediately cancel the scan the trigger just started.
+     * Folding the trigger into the repeating request itself avoids that race entirely.
+     */
+    fun submitSingleRequest(configure: (CaptureRequest.Builder) -> Unit) {
+        val currentDevice = device ?: return
+        val currentSession = session ?: return
+        val factory = activeRequestFactory ?: return
+        val params = activeParams ?: return
+        // 実機で発見: [device] passing the null-check above does not guarantee it is still
+        // open — see [updateCaptureParams]'s doc for the full explanation (this method is
+        // where the crash was actually reproduced: a long-press-to-focus gesture landing
+        // right as the session was being torn down hit `IllegalStateException:
+        // CameraDevice was already closed` inside `createCaptureRequest`, below).
+        try {
+            val builder = buildRequestBuilder(currentDevice, factory, params)
+            configure(builder)
+            currentSession.setRepeatingRequest(builder.build(), makeCaptureCallback(), callbackHandler)
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "submitSingleRequest: session/device closed mid-call, ignoring", e)
+        }
     }
 
     private fun makeCaptureCallback(): CameraCaptureSession.CaptureCallback =

@@ -14,6 +14,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -126,13 +130,7 @@ fun MainScreen(
         Box(
             modifier = Modifier
                 .weight(1f)
-                .fillMaxHeight()
-                .clickable(
-                    interactionSource = androidx.compose.runtime.remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                    indication = null
-                ) {
-                    viewModel.toggleControls()
-                },
+                .fillMaxHeight(),
             contentAlignment = Alignment.Center,
         ) {
             val configuration = androidx.compose.ui.platform.LocalConfiguration.current
@@ -165,6 +163,11 @@ fun MainScreen(
                 aspectRatio = previewAspectRatio,
                 bufferWidth = previewWidth,
                 bufferHeight = previewHeight,
+                onTap = { viewModel.toggleControls() },
+                // §AF/MFモード, 長押しでピント合わせ — a plain tap already toggles the
+                // control sidebar (onTap above), so this app uses long-press instead of
+                // Sony Photo Pro's own tap-to-focus gesture to avoid the two conflicting.
+                onLongPressToFocus = { nx, ny -> viewModel.onPreviewLongPressToFocus(nx, ny) },
             )
 
             // Composition guide (§FrameLineAspectRatio's doc) — preview-only, does not
@@ -264,12 +267,26 @@ fun MainScreen(
                         // actually happen while in Photo mode (the toggle above is disabled
                         // mid-recording), but this mirrors the ViewModel's own guard as a
                         // second line of defense rather than assuming that invariant here.
+                        //
+                        // §AF/MFモード, シャッター半押し相当: a touchscreen button has no
+                        // real two-stage press, so ACTION_DOWN triggers AF (mirroring a
+                        // physical half-press) and release fires the actual capture —
+                        // Modifier.clickable can't express "do X on down, Y on up", hence
+                        // the raw pointerInput gesture instead of clickable here.
                         Box(
                             modifier = Modifier
                                 .size(36.dp)
                                 .clip(CircleShape)
                                 .border(1.dp, OnSurfaceSecondary.copy(alpha = 0.5f), CircleShape)
-                                .clickable(enabled = state.canCapturePhoto) { viewModel.capturePhoto() },
+                                .pointerInput(state.canCapturePhoto) {
+                                    if (!state.canCapturePhoto) return@pointerInput
+                                    awaitEachGesture {
+                                        awaitFirstDown()
+                                        viewModel.onShutterHalfPress()
+                                        val up = waitForUpOrCancellation()
+                                        if (up != null) viewModel.capturePhoto()
+                                    }
+                                },
                             contentAlignment = Alignment.Center,
                         ) {
                             Text(
@@ -760,13 +777,20 @@ private fun CameraControlsPanel(
             onPresetSelect = { preset -> viewModel.setExposureTime(preset.exposureTimeNanos()) },
         )
 
-        // Focus
+        // Focus — AF/MF mode switch (§AF/MFモード). Long-press on the preview also drops
+        // into MF at the tapped point (PreviewSurfaceView's onLongPressToFocus), so this
+        // switch's state can change without the user touching it directly here.
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 0.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(text = "FOCUS", color = OnSurfacePrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(
+                text = if (state.afAuto) "AF" else "MF",
+                color = Amber,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+            )
             Switch(
                 checked = state.afAuto,
                 onCheckedChange = { viewModel.setAfAuto(it) },

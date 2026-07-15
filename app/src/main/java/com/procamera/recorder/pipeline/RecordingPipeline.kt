@@ -186,6 +186,13 @@ class RecordingPipeline(private val context: Context) {
     var onAutoWbGainsMeasured: ((android.hardware.camera2.params.RggbChannelVector, Double) -> Unit)? = null
     var onAutoFocusMeasured: ((Float) -> Unit)? = null
 
+    // Tap/long-press-to-focus (§4.1) — see [com.procamera.recorder.camera.FocusController]'s
+    // doc. (Re)created per [startPreview] since it's bound to that session's
+    // CameraCharacteristics/ManualCaptureRequestFactory; torn down alongside the session in
+    // [stopPreviewSession]/[stopAll].
+    private var focusController: com.procamera.recorder.camera.FocusController? = null
+    var onTapToFocusLocked: ((focusDistanceDiopters: Float) -> Unit)? = null
+
     // ──────────────────────────────────────────────────────────────────────────────
     // Encoder / muxer (only alive during RECORDING)
     // ──────────────────────────────────────────────────────────────────────────────
@@ -286,8 +293,25 @@ class RecordingPipeline(private val context: Context) {
             currentParams = params
             previewSurface = surface
 
+            focusController = com.procamera.recorder.camera.FocusController(
+                characteristics = characteristics,
+                captureRequestFactory = requireNotNull(requestFactory),
+                requestSubmitter = com.procamera.recorder.camera.FocusController.RequestSubmitter { configure ->
+                    sessionController.submitSingleRequest(configure)
+                },
+                onFocusLocked = { distance ->
+                    Handler(Looper.getMainLooper()).post { onTapToFocusLocked?.invoke(distance) }
+                },
+            )
+
             var frameCount = 0
             sessionController.captureResultListener = CameraSessionController.CaptureResultListener { result ->
+                // Every frame, not throttled like the WB/AF passive-measurement block below
+                // — a tap-to-focus scan needs to see CONTROL_AF_STATE transitions promptly
+                // to feel responsive (no-op when no scan is in progress; see this method's
+                // own doc for why it's cheap to call unconditionally).
+                focusController?.onCaptureResult(result, System.nanoTime())
+
                 frameCount++
                 if (frameCount % 10 == 0) {
                     if (currentParams?.wbAuto == true) {
@@ -642,6 +666,7 @@ class RecordingPipeline(private val context: Context) {
         photoReader = null
         photoHandlerThread?.quitSafely()
         photoHandlerThread = null
+        focusController = null
         audioEngineActive = false
         pipelineState = PipelineState.IDLE
     }
@@ -840,6 +865,18 @@ class RecordingPipeline(private val context: Context) {
             params = currentParams,
             jpegOrientation = orientationHint,
         )
+    }
+
+    /**
+     * Long-press-to-focus on the preview (§4.1) — [normalizedX]/[normalizedY] are [0,1]
+     * preview-view coordinates (top-left origin), already corrected by the caller for any
+     * letterboxing between the on-screen view and the actual preview `Surface` bounds (see
+     * [com.procamera.recorder.camera.TapToMeteringRegion]'s doc for the full contract).
+     * No-op if no preview session is active yet ([focusController] is null before the
+     * first successful [startPreview]).
+     */
+    fun requestTapToFocus(normalizedX: Float, normalizedY: Float) {
+        focusController?.onTap(normalizedX, normalizedY, System.nanoTime())
     }
 
     private fun savePhotoToMediaStore(bytes: ByteArray) {
