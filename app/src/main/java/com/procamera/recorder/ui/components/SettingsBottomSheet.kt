@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.RadioButton
@@ -42,6 +44,14 @@ fun SettingsBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                // ModalBottomSheet does not make its own content scrollable — this app's
+                // sensorLandscape lock (§横画面固定) leaves little vertical room, so this
+                // settings list (resolution options + storage + frame-line guide) routinely
+                // overflows the sheet's height without this. Without an explicit scroll
+                // here, the overflow instead fought with the sheet's own drag-to-dismiss
+                // gesture area, which is what real-device feedback described as "the
+                // scrollbar looks wrong."
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
             Text(
