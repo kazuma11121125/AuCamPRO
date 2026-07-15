@@ -418,6 +418,15 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         if (_uiState.value.isRecording) stopRecording() else startRecording()
     }
 
+    /** Still-photo capture (§Photo mode) — see [RecordingPipeline.capturePhoto]'s doc.
+     * PREVIEWING only, not while RECORDING (crashes — see that method's real-device doc);
+     * the on-screen button already greys out via [CameraUiState.canCapturePhoto], this is
+     * just the same guard's second line of defense for any other caller. */
+    @Suppress("MissingPermission") // only reachable once MainScreen (and PermissionGate) is composed
+    fun capturePhoto() {
+        pipeline.capturePhoto()
+    }
+
     // ──────────────────────────────────────────────────────────────────────────
     // Camera parameter controls
     // ──────────────────────────────────────────────────────────────────────────

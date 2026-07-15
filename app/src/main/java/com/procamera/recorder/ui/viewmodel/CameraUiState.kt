@@ -225,6 +225,11 @@ data class CameraUiState(
         recordingState == RecordingUiState.Previewing ||
             recordingState == RecordingUiState.Recording
 
+    /** Mirrors [RecordingPipeline.capturePhoto]'s own guard — PREVIEWING only, NOT while
+     * RECORDING (that crashes; see that method's doc for the real-device finding) — kept
+     * here too so the on-screen photo button can grey itself out without a round trip. */
+    val canCapturePhoto: Boolean get() = isPreviewing
+
     // THERMAL_STATUS_SEVERE == 3 (android.os.PowerManager) — see thermalStatus's doc for
     // why this is a raw Int comparison rather than a framework-typed field.
     val isThermalWarning: Boolean get() = thermalStatus >= 3

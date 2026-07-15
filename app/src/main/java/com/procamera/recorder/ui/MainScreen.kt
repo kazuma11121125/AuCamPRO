@@ -264,7 +264,28 @@ fun MainScreen(
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
                     .padding(bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
+                // Photo mode (§静止画撮影) — a one-shot still capture, styled as a small
+                // icon button matching Sony Photo/Video Pro's own camera-icon placement
+                // beside their REC control. Disabled while RECORDING (canCapturePhoto is
+                // PREVIEWING-only) — see CameraControlViewModel.capturePhoto's doc for the
+                // real-device crash this avoids.
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .border(1.dp, OnSurfaceSecondary.copy(alpha = 0.5f), CircleShape)
+                        .clickable(enabled = state.canCapturePhoto) { viewModel.capturePhoto() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "📷",
+                        fontSize = 16.sp,
+                        color = if (state.canCapturePhoto) OnSurfacePrimary else OnSurfaceSecondary.copy(alpha = 0.4f),
+                    )
+                }
+                Spacer(Modifier.width(16.dp))
                 RecIndicator(state = state)
             }
         }

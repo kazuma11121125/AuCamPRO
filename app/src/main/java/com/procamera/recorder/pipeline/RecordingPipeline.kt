@@ -164,6 +164,10 @@ class RecordingPipeline(private val context: Context) {
      * frozen (not updated) while a recording is in progress. */
     var onHistogramUpdated: ((FloatArray) -> Unit)? = null
 
+    // Still-photo capture (§Photo mode). Preview-session-only, same reasoning as
+    // histogramReader — see startPreview()'s call site and capturePhoto()'s doc.
+    private var photoReader: android.media.ImageReader? = null
+
     // User-configurable settings
     private var nextVideoConfig: CameraCapabilityInspector.VideoConfigCandidate? = null
     private var storageLocation: StorageLocation = StorageLocation.AppPrivate
@@ -323,25 +327,61 @@ class RecordingPipeline(private val context: Context) {
                     }
                 }
 
+            // Still-photo capture reader (§Photo mode) — also preview-session-only (never
+            // added to the recording session's surface set), same reasoning as the
+            // histogram reader. Sized to the exact 3840x2160 the recording path already
+            // proves out (see supportedVideoConfigs()'s 3840x2880 doc for why picking an
+            // unproven size here is a real risk on this hardware), falling back to the
+            // largest available JPEG size only if that exact one isn't offered.
+            photoReader?.close()
+            photoReader = pickPhotoOutputSize(characteristics)?.let { size ->
+                try {
+                    android.media.ImageReader.newInstance(
+                        size.width, size.height, android.graphics.ImageFormat.JPEG, 2,
+                    ).apply {
+                        setOnImageAvailableListener({ r ->
+                            val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+                            try {
+                                val buffer = image.planes[0].buffer
+                                val bytes = ByteArray(buffer.remaining())
+                                buffer.get(bytes)
+                                savePhotoToMediaStore(bytes)
+                            } finally {
+                                image.close()
+                            }
+                        }, Handler(Looper.getMainLooper()))
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Photo reader creation failed, continuing without it", e)
+                    null
+                }
+            }
+
             // If no surface is available yet, defer actually opening the session.
             if (surface != null) {
+                val extraSurfaces = listOfNotNull(histogramReader?.surface, photoReader?.surface)
                 try {
                     sessionController.startRepeating(
                         cameraId = lens.cameraId,
-                        outputSurfaces = listOfNotNull(surface, histogramReader?.surface),
+                        outputSurfaces = listOf(surface) + extraSurfaces,
+                        // Histogram wants every preview frame (see its own doc) but the
+                        // photo reader must NOT be targeted by the repeating request — see
+                        // startRepeating()'s repeatingTargets doc for the real-device bug
+                        // this fixes (continuous full-res JPEG encoding of every frame).
+                        repeatingTargets = listOfNotNull(surface, histogramReader?.surface),
                         requestFactory = requireNotNull(requestFactory),
                         params = params,
                     )
                 } catch (e: Exception) {
-                    if (histogramReader != null) {
-                        // The 3-stream combo (preview + histogram) isn't guaranteed
+                    if (extraSurfaces.isNotEmpty()) {
+                        // The full combo (preview + histogram + photo) isn't guaranteed
                         // supported on every device — real-device testing already found
                         // this exact camera rejects some concurrent stream combos outright
                         // (see supportedVideoConfigs()'s 3840x2880 doc). Retry preview-only
-                        // rather than losing the whole preview over a UI-assist extra.
-                        Log.w(TAG, "Preview session with histogram stream failed, retrying without it", e)
-                        histogramReader?.close()
-                        histogramReader = null
+                        // rather than losing the whole preview over UI-assist/photo extras.
+                        Log.w(TAG, "Preview session with extra streams failed, retrying preview-only", e)
+                        histogramReader?.close(); histogramReader = null
+                        photoReader?.close(); photoReader = null
                         sessionController.startRepeating(
                             cameraId = lens.cameraId,
                             outputSurfaces = listOf(surface),
@@ -585,6 +625,8 @@ class RecordingPipeline(private val context: Context) {
         orientationTracker.stop()
         histogramReader?.close()
         histogramReader = null
+        photoReader?.close()
+        photoReader = null
         audioEngineActive = false
         pipelineState = PipelineState.IDLE
     }
@@ -737,6 +779,89 @@ class RecordingPipeline(private val context: Context) {
                 Log.e(TAG, "Failed to export ${file.name} to MediaStore Movies", e)
             }
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Still-photo capture (§Photo mode)
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Fires a still-photo capture via [photoReader] (set up in [startPreview] alongside the
+     * histogram reader) and saves the resulting JPEG to MediaStore `Pictures/ProCamera`
+     * (always the public gallery location — unlike video's [StorageLocation] choice, a
+     * one-off photo the user explicitly asked to capture is exactly the kind of content a
+     * gallery app should show). No-op if not currently in a session with a live photo
+     * reader (e.g. this device's preview session fell back to preview-only — see
+     * [startPreview]'s fallback doc — or no preview has started yet).
+     *
+     * **PREVIEWING only, not while RECORDING**: [photoReader]'s surface is deliberately
+     * never added to the *recording* session's surface set (only the plain preview
+     * session's — see [startPreview]'s call site), the same reasoning as
+     * [histogramReader] not being added there either. **実機で発見** — targeting a photo
+     * capture at the currently-active session while a recording had reconfigured it to
+     * `[previewSurface, video.inputSurface]` crashed outright
+     * (`IllegalArgumentException: CaptureRequest contains unconfigured Input/Output
+     * Surface!` — Camera2 requires every capture target to already be part of the
+     * *current* session, and by then it wasn't). Adding a 3rd stream to the
+     * recording session was judged not worth the risk given this exact hardware's already-
+     * confirmed stream-combination fragility (see [supportedVideoConfigs]'s 3840x2880 doc)
+     * — so this guards on PREVIEWING specifically rather than attempting it.
+     */
+    @RequiresPermission(Manifest.permission.CAMERA)
+    fun capturePhoto() {
+        if (pipelineState != PipelineState.PREVIEWING) return
+        val reader = photoReader ?: run {
+            Log.w(TAG, "capturePhoto: no photo reader available for this session")
+            return
+        }
+        val factory = requestFactory ?: return
+        val lens = selectedLens ?: return
+
+        val characteristics = sessionController.characteristicsFor(lens.cameraId)
+        val orientationHint = orientationTracker.orientationHintDegreesFor(characteristics)
+        sessionController.capturePhoto(
+            jpegSurface = reader.surface,
+            requestFactory = factory,
+            params = currentParams,
+            jpegOrientation = orientationHint,
+        )
+    }
+
+    private fun savePhotoToMediaStore(bytes: ByteArray) {
+        val resolver = context.contentResolver
+        val fileName = "IMG_${System.currentTimeMillis()}.jpg"
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/ProCamera")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        if (uri == null) {
+            Log.e(TAG, "MediaStore insert failed for photo")
+            return
+        }
+        try {
+            resolver.openOutputStream(uri)?.use { out -> out.write(bytes) }
+            resolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null)
+            Log.i(TAG, "Photo saved: $fileName")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save photo", e)
+        }
+    }
+
+    /** Prefers the exact 3840x2160 size the recording path already proves works
+     * concurrently with the fixed 16:9 preview buffer on this hardware (see
+     * [supportedVideoConfigs]'s 3840x2880 doc for why an unproven size here is a real risk),
+     * falling back to the largest available JPEG size if that exact one isn't offered. */
+    private fun pickPhotoOutputSize(
+        characteristics: android.hardware.camera2.CameraCharacteristics,
+    ): android.util.Size? {
+        val map = characteristics.get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            as? android.hardware.camera2.params.StreamConfigurationMap ?: return null
+        val sizes = map.getOutputSizes(android.graphics.ImageFormat.JPEG) ?: return null
+        return sizes.firstOrNull { it.width == 3840 && it.height == 2160 }
+            ?: sizes.maxByOrNull { it.width.toLong() * it.height.toLong() }
     }
 
     private fun stopPreviewSession() {

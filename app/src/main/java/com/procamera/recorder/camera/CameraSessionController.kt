@@ -57,13 +57,29 @@ class CameraSessionController(private val cameraManager: CameraManager) {
 
     /**
      * Opens [cameraId] and configures a session with [outputSurfaces] (e.g. just a preview
-     * surface, or preview + encoder InputSurface). Starts a repeating request immediately.
+     * surface, or preview + encoder InputSurface). Starts a repeating request immediately,
+     * targeting [repeatingTargets] (defaults to all of [outputSurfaces]).
      *
      * Replaces the previous single-surface API. Passing the encoder's InputSurface and/or
      * a preview Surface is the caller's responsibility:
      * - Preview-only: `listOf(previewSurface)`
      * - Recording: `listOf(previewSurface, encoderInputSurface)` or just `listOf(encoderInputSurface)`
      *   when no preview is available (smoke-test mode).
+     *
+     * **[repeatingTargets] vs [outputSurfaces]**: every surface in [outputSurfaces] is
+     * configured into the `CameraCaptureSession` (so it CAN be targeted by some capture
+     * request later), but only [repeatingTargets] is actually targeted by the *continuous*
+     * repeating request `buildRequest()` builds — a surface configured but excluded from
+     * that list sits idle until something else (e.g. [capturePhoto]'s one-shot
+     * `TEMPLATE_STILL_CAPTURE`) explicitly targets it. This distinction matters for a
+     * still-photo `ImageReader`: **実機で発見・修正** — with no [repeatingTargets] override,
+     * such a reader defaulted to also being targeted by the repeating *preview* request,
+     * meaning it silently full-res-JPEG-encoded every single preview frame (confirmed via
+     * `capturePhoto()` producing two saved files from one tap — the reader's queue already
+     * had a stale frame from the last "repeating" delivery sitting in it before the actual
+     * one-shot capture's image even arrived) — a large, pointless continuous encode cost
+     * `LuminanceHistogramReader` deliberately *does* want (it needs every preview frame,
+     * just downsampled small — see its own doc), but a photo reader should not.
      */
     @RequiresPermission(Manifest.permission.CAMERA)
     suspend fun startRepeating(
@@ -71,6 +87,7 @@ class CameraSessionController(private val cameraManager: CameraManager) {
         outputSurfaces: List<Surface>,
         requestFactory: ManualCaptureRequestFactory,
         params: CameraParams,
+        repeatingTargets: List<Surface> = outputSurfaces,
     ) {
         require(outputSurfaces.isNotEmpty()) { "At least one output surface required" }
 
@@ -80,7 +97,7 @@ class CameraSessionController(private val cameraManager: CameraManager) {
         val captureSession = createSession(cameraDevice, outputSurfaces)
         session = captureSession
 
-        activeSurfaces = outputSurfaces
+        activeSurfaces = repeatingTargets
         activeRequestFactory = requestFactory
         activeParams = params
 
@@ -109,6 +126,39 @@ class CameraSessionController(private val cameraManager: CameraManager) {
             makeCaptureCallback(),
             callbackHandler,
         )
+    }
+
+    /**
+     * Fires a single `TEMPLATE_STILL_CAPTURE` request targeting [jpegSurface] — which must
+     * already be part of the currently active session's surface set (added at
+     * [startRepeating] time; Camera2 requires every capture target to have been included
+     * when the session was configured, it can't be added ad hoc) — alongside the existing
+     * repeating preview/record request, which continues completely unaffected (this is a
+     * one-shot [CameraCaptureSession.capture], not a replacement of the repeating request).
+     * [jpegOrientation] sets `CaptureRequest.JPEG_ORIENTATION` so the saved file is tagged
+     * for correct display — same rotation math as the video path's
+     * `MediaMuxer.setOrientationHint` (see `DeviceOrientationTracker`'s doc), just via the
+     * stills-specific capture-request key instead of a container-level hint.
+     *
+     * No-op if no session is active.
+     */
+    @RequiresPermission(Manifest.permission.CAMERA)
+    fun capturePhoto(
+        jpegSurface: Surface,
+        requestFactory: ManualCaptureRequestFactory,
+        params: CameraParams,
+        jpegOrientation: Int,
+    ) {
+        val currentDevice = device ?: return
+        val currentSession = session ?: return
+        val builder = currentDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+        builder.addTarget(jpegSurface)
+        requestFactory.applyManualExposure(builder, params.iso, params.exposureTimeNanos, params.fps)
+        requestFactory.applyFocus(builder, params.focusDistanceDiopters, params.afAuto)
+        requestFactory.applyWhiteBalance(builder, params)
+        requestFactory.applyZoom(builder, params.zoomRatio)
+        builder.set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+        currentSession.capture(builder.build(), null, callbackHandler)
     }
 
     /** Closes the session and device; does not stop the callback thread — see [release]. */
