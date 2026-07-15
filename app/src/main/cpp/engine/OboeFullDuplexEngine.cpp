@@ -25,6 +25,18 @@ Result<std::shared_ptr<oboe::AudioStream>, std::string> OboeFullDuplexEngine::op
         const char *description;
     };
     const Attempt attempts[] = {
+        // Provisional (2026-07-15, pending confirmation with an actual sound source — see
+        // this file's git history for the real-device investigation): user reports Sony's
+        // own Video Pro app shows both input channels active on this hardware, where
+        // ProCamera's previous Unprocessed-first stream read R as consistently silent
+        // (reproduced across multiple ambient-noise and +10.8dB-gain-boosted tests here,
+        // in both Unprocessed and this Camcorder attempt, but always in a quiet room —
+        // inconclusive without a real signal to A/B against). Trying Camcorder FIRST as
+        // the working hypothesis until it's confirmed against real audio either way —
+        // Unprocessed's whole point (see OboeFullDuplexEngine.h's doc) is avoiding OS-level
+        // AGC fighting this app's own InputGain/SafetyLimiter, so reverting to it is one
+        // config change away (just reorder this list) if Camcorder doesn't pan out.
+        {oboe::SharingMode::Exclusive, oboe::InputPreset::Camcorder, "Exclusive+Camcorder (R-channel investigation, provisional default)"},
         {oboe::SharingMode::Exclusive, oboe::InputPreset::Unprocessed, "Exclusive+Unprocessed"},
         {oboe::SharingMode::Shared, oboe::InputPreset::Unprocessed, "Shared+Unprocessed (SharingMode fallback)"},
         {oboe::SharingMode::Shared, oboe::InputPreset::VoiceRecognition,
@@ -85,6 +97,15 @@ Result<std::shared_ptr<oboe::AudioStream>, std::string> OboeFullDuplexEngine::op
             return Result<std::shared_ptr<oboe::AudioStream>, std::string>::Err(
                 "Input stream channel/sample-rate conversion did not produce the expected format");
         }
+
+        // TEMPORARY diagnostic (2026-07-15 real-device R-channel investigation) — logs
+        // which physical input device AAudio actually routed to, and its declared channel
+        // mask, so this can be cross-referenced against `dumpsys audio`'s device list to
+        // check whether the "stereo" stream we open is genuinely a 2-mic array device or a
+        // mono device AAudio is silently channel-converting (which would explain a
+        // consistently-silent second channel far better than the InputPreset choice does).
+        PROCAMERA_LOGI("Input stream opened: deviceId=%d channelCount=%d sampleRate=%d",
+                        stream->getDeviceId(), stream->getChannelCount(), stream->getSampleRate());
 
         return Result<std::shared_ptr<oboe::AudioStream>, std::string>::Ok(stream);
     }
