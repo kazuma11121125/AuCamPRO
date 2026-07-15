@@ -108,8 +108,19 @@ class VideoEncoder(
             }
         })
 
-        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        inputSurface = codec.createInputSurface()
+        // release() on failure: configure()/createInputSurface() can throw (e.g. an
+        // unsupported format) after createEncoderByType() already allocated the hardware
+        // codec instance above — real devices commonly cap concurrent hardware encoders
+        // at a small number, so leaking one here on a failed recording start could make
+        // the *next* attempt fail too even after the user fixes whatever caused this one
+        // to fail.
+        try {
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            inputSurface = codec.createInputSurface()
+        } catch (e: Exception) {
+            codec.release()
+            throw e
+        }
     }
 
     fun start() {

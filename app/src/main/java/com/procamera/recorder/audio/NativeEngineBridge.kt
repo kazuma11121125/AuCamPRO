@@ -12,7 +12,16 @@ package com.procamera.recorder.audio
  */
 class NativeEngineBridge : AutoCloseable {
     private val handle: Long = nativeCreate()
-    private var closed = false
+
+    // Volatile, not a plain var: real-device finding — the meter poll loop
+    // (CameraControlViewModel's ~30fps meterJob) reads peakDb/rmsDb from a coroutine
+    // dispatcher thread while close() (RecordingPipeline.stopAll(), from the ViewModel's
+    // onCleared()) can run concurrently on another; a plain var risks the poll thread
+    // never observing the flip and calling into a native handle nativeDestroy() already
+    // deleted (use-after-free). A single in-flight call can still race past this check,
+    // but that's an unavoidable TOCTOU without adding locking to a ~30fps hot path — this
+    // closes the far larger window where every poll after close() would otherwise crash.
+    @Volatile private var closed = false
 
     /** [preferredInputDeviceId] of 0 means "let the OS choose" (oboe::kUnspecified). */
     fun start(preferredInputDeviceId: Int = kUnspecifiedDeviceId): String? =
@@ -38,13 +47,13 @@ class NativeEngineBridge : AutoCloseable {
     fun setInputGainDb(gainDb: Float) = nativeSetInputGainDb(handle, gainDb)
 
     /** [channel]: 0 = left, 1 = right — see `dsp/PeakRmsMeter.h`'s doc for why L/R are tracked independently. */
-    fun peakDb(channel: Int): Float = nativePeakDb(handle, channel)
+    fun peakDb(channel: Int): Float = if (closed) SILENCE_DB else nativePeakDb(handle, channel)
 
-    fun rmsDb(channel: Int): Float = nativeRmsDb(handle, channel)
+    fun rmsDb(channel: Int): Float = if (closed) SILENCE_DB else nativeRmsDb(handle, channel)
 
-    fun ringBufferOverrunCount(): Int = nativeRingBufferOverrunCount(handle)
+    fun ringBufferOverrunCount(): Int = if (closed) 0 else nativeRingBufferOverrunCount(handle)
 
-    fun hardwareXRunCount(): Int = nativeHardwareXRunCount(handle)
+    fun hardwareXRunCount(): Int = if (closed) 0 else nativeHardwareXRunCount(handle)
 
     /**
      * One-shot (framePosition, timeNanos) correlation at CLOCK_MONOTONIC, used to seed
@@ -78,6 +87,7 @@ class NativeEngineBridge : AutoCloseable {
 
     private companion object {
         const val kUnspecifiedDeviceId = 0 // matches oboe::kUnspecified
+        const val SILENCE_DB = -100f // matches PeakRmsMeter.cpp's own kSilenceFloorDb
 
         init {
             System.loadLibrary("procamera_native")

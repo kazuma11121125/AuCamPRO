@@ -196,6 +196,18 @@ class CameraSessionController(private val cameraManager: CameraManager) {
 
     /** Closes the session and device; does not stop the callback thread — see [release]. */
     fun stop() {
+        // abortCaptures() before close(): some OEM HALs throw CameraAccessException
+        // (CAMERA_ERROR "cancelRequest") out of close() if a repeating request is still
+        // actively streaming when it's called — abort discards in-flight requests first,
+        // which close() alone is not documented to guarantee. Session may already be
+        // mid-teardown (e.g. a device disconnect racing this call), so this is
+        // best-effort, same as the other CameraAccessException/IllegalStateException
+        // guards in this file.
+        try {
+            session?.abortCaptures()
+        } catch (e: Exception) {
+            Log.w(TAG, "stop: abortCaptures failed, proceeding to close anyway", e)
+        }
         session?.close()
         device?.close()
         session = null
@@ -293,7 +305,17 @@ class CameraSessionController(private val cameraManager: CameraManager) {
                 cameraId,
                 object : CameraDevice.StateCallback() {
                     override fun onOpened(camera: CameraDevice) {
-                        cont.resume(camera)
+                        if (cont.isActive) {
+                            cont.resume(camera)
+                        } else {
+                            // The coroutine was cancelled while the camera was opening
+                            // (e.g. the caller backgrounded mid-open) — resume() on an
+                            // already-cancelled continuation silently discards `camera`
+                            // without closing it, leaking the exclusive camera hardware
+                            // lock. That can block every future openCamera() call, by
+                            // this app or another, until the OS eventually reclaims it.
+                            camera.close()
+                        }
                     }
 
                     override fun onDisconnected(camera: CameraDevice) {

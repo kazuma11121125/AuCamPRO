@@ -4,6 +4,8 @@ import android.content.Context
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.os.Handler
+import android.os.HandlerThread
 
 /**
  * Picks and observes which physical device [NativeEngineBridge] should record from, per
@@ -23,6 +25,7 @@ import android.media.AudioManager
 class AudioDeviceRouter(context: Context) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var callback: AudioDeviceCallback? = null
+    private var callbackThread: HandlerThread? = null
 
     /** User-facing mic preference (§4.5 "現在の入力デバイス表示" + manual override). [Auto]
      * follows the USB > 有線 > 内蔵 priority; the others pin one kind to the front of
@@ -90,21 +93,31 @@ class AudioDeviceRouter(context: Context) {
      * Registers [onChanged] to fire whenever an input device is connected or disconnected
      * (e.g. a USB interface plugged/unplugged mid-recording). Only one callback may be
      * registered at a time; must be paired with [unregister] (see
-     * `RecordingPipeline.stopAll()`). Delivered on the calling thread's Looper.
+     * `RecordingPipeline.stopAll()`). Delivered on a dedicated background thread, not the
+     * calling thread's Looper — real-device finding: [onChanged] (wired to
+     * `RecordingPipeline.onAudioDeviceSetChanged`) makes a blocking native
+     * `reopenInputStream()` call, and this is constructed from the main thread, so a null
+     * `Handler` here (Android's "deliver on the calling thread's Looper" default) put that
+     * block on the main thread — reproduced as a real ANR ("Input dispatching timed out")
+     * during a hot-swap while recording.
      */
     fun register(onChanged: () -> Unit) {
         unregister()
+        val thread = HandlerThread("AudioDeviceRouterCallback").apply { start() }
+        callbackThread = thread
         val cb = object : AudioDeviceCallback() {
             override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) = onChanged()
             override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) = onChanged()
         }
         callback = cb
-        audioManager.registerAudioDeviceCallback(cb, null)
+        audioManager.registerAudioDeviceCallback(cb, Handler(thread.looper))
     }
 
     fun unregister() {
         callback?.let { audioManager.unregisterAudioDeviceCallback(it) }
         callback = null
+        callbackThread?.quitSafely()
+        callbackThread = null
     }
 
     private fun priorityOf(type: Int): Int = when {
