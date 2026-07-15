@@ -581,17 +581,38 @@ private fun GalleryThumbnailButton(uri: Uri?, isVideo: Boolean, modifier: Modifi
                 // 実機で発見: this device has both Google Photos and "Photos Go" installed
                 // (confirmed via `dumpsys package resolver-table` — both register for
                 // `vnd.android.cursor.dir/image` VIEW), so the plain implicit Intent shows
-                // a chooser on *every* tap — Android's "Always" remembered-default doesn't
-                // reliably suppress it for this content-URI VIEW pattern (real-device
-                // feedback: picking the same app every time still re-prompted). Resolving
-                // to a specific package up front skips the chooser entirely when a known
-                // gallery app is present, falling back to the system chooser only if
-                // neither is installed.
-                val targetPackage = listOf("com.google.android.apps.photos", "com.sonymobile.album")
-                    .firstOrNull { pkg ->
-                        context.packageManager.resolveActivity(Intent(intent).setPackage(pkg), 0) != null
+                // a chooser on *every* tap. Setting just the *package* (an earlier attempt)
+                // wasn't enough either — real-device feedback confirmed the dialog kept
+                // appearing — because Google Photos alone registers *multiple* matching
+                // activities for this same intent shape (HostPhotoPagerActivity,
+                // ExternalPickerActivity, ...; also seen in that same dumpsys output), so
+                // even a package-scoped Intent was still ambiguous. Resolving with
+                // MATCH_DEFAULT_ONLY (the flag that filters to components declaring
+                // `<category android:name="android.intent.category.DEFAULT"/>`, i.e. "the
+                // one meant to be launched implicitly like this") and then targeting that
+                // *exact component* — not just the package — is what actually collapses it
+                // to zero ambiguity.
+                val defaultActivity = context.packageManager.resolveActivity(
+                    intent,
+                    android.content.pm.PackageManager.MATCH_DEFAULT_ONLY,
+                )?.activityInfo
+                // A genuinely ambiguous resolution (no persisted system default, multiple
+                // apps still tied) comes back as the system's own chooser stub
+                // ("android" package) rather than a real target — falling through to it
+                // would just show the same dialog under a different code path. Detect
+                // that and fall back to explicitly picking Google Photos' own
+                // DEFAULT-category activity instead of trusting this resolution.
+                val targetComponent = if (defaultActivity != null && defaultActivity.packageName != "android") {
+                    android.content.ComponentName(defaultActivity.packageName, defaultActivity.name)
+                } else {
+                    context.packageManager.queryIntentActivities(
+                        Intent(intent).setPackage("com.google.android.apps.photos"),
+                        android.content.pm.PackageManager.MATCH_DEFAULT_ONLY,
+                    ).firstOrNull()?.activityInfo?.let {
+                        android.content.ComponentName(it.packageName, it.name)
                     }
-                if (targetPackage != null) intent.setPackage(targetPackage)
+                }
+                if (targetComponent != null) intent.component = targetComponent
                 context.startActivity(intent)
             },
         contentAlignment = Alignment.Center,
