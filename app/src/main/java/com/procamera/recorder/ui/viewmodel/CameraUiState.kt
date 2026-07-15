@@ -48,6 +48,19 @@ data class EqBandState(
 enum class ControlPanel { Camera, Audio }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Capture mode (photo ⇄ video)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Which action the shutter (hardware camera key + on-screen shutter control) performs.
+ * Sony's Photo Pro and Video Pro are two separate apps, each dedicating the same
+ * hardware key to one action — this reproduces that split inside a single app rather
+ * than showing a still-capture button and a REC indicator side by side at all times
+ * (real-device feedback: 静止画と録画はモード切り替えで行う、Photo Proのように).
+ */
+enum class CaptureMode { Photo, Video }
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Storage location type
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -216,6 +229,9 @@ data class CameraUiState(
 
     // ── UI Visibility ────────────────────────────────────────────────────────
     val showControls: Boolean = true,
+
+    // ── Capture mode (§CaptureMode's doc) ────────────────────────────────────
+    val captureMode: CaptureMode = CaptureMode.Video,
 ) {
     val isRecording: Boolean get() = recordingState == RecordingUiState.Recording
     val isPreviewing: Boolean get() = recordingState == RecordingUiState.Previewing

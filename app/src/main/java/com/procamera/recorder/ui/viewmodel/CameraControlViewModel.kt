@@ -427,6 +427,28 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         pipeline.capturePhoto()
     }
 
+    /** Switches which action the shutter performs (§CaptureMode's doc). Disallowed
+     * mid-recording — MainScreen's mode toggle already greys itself out via
+     * [CameraUiState.isRecording], this is the second line of defense so a stray call
+     * can't switch a live take out from under the hardware key. */
+    fun setCaptureMode(mode: CaptureMode) {
+        if (_uiState.value.isRecording) return
+        _uiState.update { it.copy(captureMode = mode) }
+    }
+
+    /**
+     * Single entry point for "the shutter was pressed" — the Xperia hardware camera key
+     * (MainActivity.dispatchKeyEvent) and the on-screen shutter control both call this
+     * rather than [toggleRecording]/[capturePhoto] directly, so which one actually fires
+     * always follows [CameraUiState.captureMode] (§CaptureMode's doc).
+     */
+    fun onShutterPressed() {
+        when (_uiState.value.captureMode) {
+            CaptureMode.Photo -> capturePhoto()
+            CaptureMode.Video -> toggleRecording()
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────────────────
     // Camera parameter controls
     // ──────────────────────────────────────────────────────────────────────────

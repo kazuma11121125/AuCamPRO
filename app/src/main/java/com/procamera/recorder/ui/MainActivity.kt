@@ -96,8 +96,11 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Xperia's dedicated hardware camera/shutter key (Sony__________.pdf: "カメラキー(シャッ
-     * ターボタン)の割り当てAssign shutter button") toggles REC, mirroring the on-screen
-     * button (§[CameraControlViewModel.toggleRecording]). Handled at `dispatchKeyEvent`
+     * ターボタン)の割り当てAssign shutter button") dispatches through
+     * [CameraControlViewModel.onShutterPressed], so it takes a photo or toggles REC
+     * depending on the current [com.procamera.recorder.ui.viewmodel.CaptureMode]
+     * (§写真/動画モード切り替え, Photo Pro/Video Pro方式) rather than always meaning REC.
+     * Handled at `dispatchKeyEvent`
      * rather than `onKeyDown` so it's intercepted ahead of Compose's own focus-based key
      * handling — none of the current UI needs `KEYCODE_CAMERA` for anything else, so there
      * is nothing to conflict with. `repeatCount == 0` guards against a held key re-firing
@@ -125,7 +128,7 @@ class MainActivity : ComponentActivity() {
             val now = android.os.SystemClock.elapsedRealtime()
             if (now - lastCameraKeyAcceptedAtMs >= CAMERA_KEY_DEBOUNCE_MS) {
                 lastCameraKeyAcceptedAtMs = now
-                viewModel.toggleRecording()
+                viewModel.onShutterPressed()
             }
             return true
         }

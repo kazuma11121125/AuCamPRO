@@ -73,6 +73,7 @@ import com.procamera.recorder.ui.theme.SurfaceBlack
 import com.procamera.recorder.ui.theme.SurfaceDark
 import com.procamera.recorder.ui.viewmodel.CameraControlViewModel
 import com.procamera.recorder.ui.viewmodel.CameraUiState
+import com.procamera.recorder.ui.viewmodel.CaptureMode
 import com.procamera.recorder.ui.viewmodel.ControlPanel
 import com.procamera.recorder.ui.viewmodel.EqBandState
 import com.procamera.recorder.ui.viewmodel.RecordingUiState
@@ -238,14 +239,17 @@ fun MainScreen(
                 )
             }
 
-            // REC status — small, always-visible (not gated on state.showControls, unlike
-            // the rest of StatusOverlay it used to live inside): recording is now started
-            // exclusively via the Xperia hardware camera key (CameraControlViewModel.
-            // toggleRecording(), wired in MainActivity.dispatchKeyEvent) rather than an
-            // on-screen button, per real-device feedback that the tappable REC circle was
-            // unwanted once the hardware key covered the same action. This indicator is
-            // the one thing that must never disappear, though — there is no other always-
-            // visible confirmation that a take is actually rolling.
+            // Shutter row — small, always-visible (not gated on state.showControls, unlike
+            // the rest of StatusOverlay it used to live inside): this must stay reachable
+            // regardless of the sidebar's visibility, since it's the one thing with no other
+            // always-visible confirmation (REC status) or hardware-key-only path (photo).
+            //
+            // §静止画/動画モード切り替え (Photo Pro/Video Pro方式): which action this row
+            // shows follows [state.captureMode], set via the top-left mode toggle (see
+            // StatusOverlay — placed there to match Photo Pro's own AUTO/mode pill
+            // position, per real-device screenshot comparison). The hardware key
+            // (MainActivity.dispatchKeyEvent → CameraControlViewModel.onShutterPressed)
+            // follows the same captureMode.
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -253,27 +257,33 @@ fun MainScreen(
                     .padding(bottom = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Photo mode (§静止画撮影) — a one-shot still capture, styled as a small
-                // icon button matching Sony Photo/Video Pro's own camera-icon placement
-                // beside their REC control. Disabled while RECORDING (canCapturePhoto is
-                // PREVIEWING-only) — see CameraControlViewModel.capturePhoto's doc for the
-                // real-device crash this avoids.
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .border(1.dp, OnSurfaceSecondary.copy(alpha = 0.5f), CircleShape)
-                        .clickable(enabled = state.canCapturePhoto) { viewModel.capturePhoto() },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "📷",
-                        fontSize = 16.sp,
-                        color = if (state.canCapturePhoto) OnSurfacePrimary else OnSurfaceSecondary.copy(alpha = 0.4f),
-                    )
+                when (state.captureMode) {
+                    CaptureMode.Photo -> {
+                        // One-shot still capture. Disabled while RECORDING (canCapturePhoto
+                        // is PREVIEWING-only) — see CameraControlViewModel.capturePhoto's
+                        // doc for the real-device crash this avoids. RECORDING can't
+                        // actually happen while in Photo mode (the toggle above is disabled
+                        // mid-recording), but this mirrors the ViewModel's own guard as a
+                        // second line of defense rather than assuming that invariant here.
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .border(1.dp, OnSurfaceSecondary.copy(alpha = 0.5f), CircleShape)
+                                .clickable(enabled = state.canCapturePhoto) { viewModel.capturePhoto() },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "📷",
+                                fontSize = 16.sp,
+                                color = if (state.canCapturePhoto) OnSurfacePrimary else OnSurfaceSecondary.copy(alpha = 0.4f),
+                            )
+                        }
+                    }
+                    CaptureMode.Video -> {
+                        RecIndicator(state = state)
+                    }
                 }
-                Spacer(Modifier.width(16.dp))
-                RecIndicator(state = state)
             }
         }
 
@@ -382,8 +392,17 @@ private fun StatusOverlay(
         // No left-side REC indicator here anymore — it moved to its own always-visible
         // bottom-center overlay (MainScreen's Box) since this whole StatusOverlay hides
         // with state.showControls, and REC status must never be hideable (see that call
-        // site's doc). Keeping this Row's remaining two groups at the edges rather than
-        // re-centering them; a config readout is best origin-anchored.
+        // site's doc).
+
+        // ── Left: capture mode toggle (§静止画/動画モード切り替え) ────────────────
+        // Real-device feedback: Sony Photo Pro puts its own AUTO/video-mode pill in this
+        // same top corner (screenshot comparison against the real app) — matching that
+        // placement rather than the bottom-center spot this used to live in.
+        CaptureModeToggle(
+            mode = state.captureMode,
+            enabled = !state.isRecording,
+            onSelect = { viewModel.setCaptureMode(it) },
+        )
 
         // ── Center: video config ─────────────────────────────────────────────
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -434,6 +453,40 @@ private fun StatusOverlay(
                 fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace,
             )
+        }
+    }
+}
+
+/**
+ * PHOTO ⇄ VIDEO segmented toggle (§静止画/動画モード切り替え, Photo Pro/Video Pro方式) —
+ * see the call site's doc for why this replaces always showing both a still-capture
+ * button and a REC indicator.
+ */
+@Composable
+private fun CaptureModeToggle(
+    mode: CaptureMode,
+    enabled: Boolean,
+    onSelect: (CaptureMode) -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        listOf(CaptureMode.Photo to "📷", CaptureMode.Video to "🎥").forEach { (candidate, icon) ->
+            val isSelected = mode == candidate
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(if (isSelected) Amber else Color.Transparent)
+                    .border(1.dp, if (isSelected) Amber else OnSurfaceSecondary.copy(alpha = 0.5f), CircleShape)
+                    .clickable(enabled = enabled) { onSelect(candidate) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = icon,
+                    fontSize = 12.sp,
+                    color = if (isSelected) SurfaceBlack else OnSurfaceSecondary.copy(alpha = if (enabled) 1f else 0.4f),
+                )
+            }
+            Spacer(Modifier.width(6.dp))
         }
     }
 }
