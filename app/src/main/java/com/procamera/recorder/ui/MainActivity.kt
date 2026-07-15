@@ -66,6 +66,22 @@ class MainActivity : ComponentActivity() {
         // A WakeLock will supplement this when the Foreground Service is running (Phase 4b).
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        // §4.6 thermal investigation follow-up (2026-07-15): there is no Android API that
+        // lets an app *ignore* thermal throttling — the SoC's DVFS governor protects the
+        // hardware at the kernel/firmware level regardless of anything an app requests, and
+        // real-device measurement this session confirmed the throttling itself is genuine
+        // (a clean recording early in a long test session hit ~29.75fps of a 30fps target;
+        // one taken after hours of continuous rebuild/install/record cycles measured only
+        // ~17-18fps, with Android's own PowerManager thermal-status API misleadingly
+        // reporting NONE throughout — that coarse status is not a reliable signal for this).
+        // `setSustainedPerformanceMode` is the closest legitimate lever: it doesn't disable
+        // throttling, but it asks the system to favor a stable *sustained* clock speed from
+        // the start over the usual burst-to-max-turbo-then-throttle-hard pattern — a better
+        // fit for a continuous 4K encode workload like this app's than the default policy.
+        if (getSystemService(android.os.PowerManager::class.java)?.isSustainedPerformanceModeSupported == true) {
+            window.setSustainedPerformanceMode(true)
+        }
+
         // Edge-to-edge: the composable uses statusBarsPadding / navigationBarsPadding.
         enableEdgeToEdge()
 
