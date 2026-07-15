@@ -25,18 +25,14 @@ Result<std::shared_ptr<oboe::AudioStream>, std::string> OboeFullDuplexEngine::op
         const char *description;
     };
     const Attempt attempts[] = {
-        // Provisional (2026-07-15, pending confirmation with an actual sound source — see
-        // this file's git history for the real-device investigation): user reports Sony's
-        // own Video Pro app shows both input channels active on this hardware, where
-        // ProCamera's previous Unprocessed-first stream read R as consistently silent
-        // (reproduced across multiple ambient-noise and +10.8dB-gain-boosted tests here,
-        // in both Unprocessed and this Camcorder attempt, but always in a quiet room —
-        // inconclusive without a real signal to A/B against). Trying Camcorder FIRST as
-        // the working hypothesis until it's confirmed against real audio either way —
-        // Unprocessed's whole point (see OboeFullDuplexEngine.h's doc) is avoiding OS-level
-        // AGC fighting this app's own InputGain/SafetyLimiter, so reverting to it is one
-        // config change away (just reorder this list) if Camcorder doesn't pan out.
-        {oboe::SharingMode::Exclusive, oboe::InputPreset::Camcorder, "Exclusive+Camcorder (R-channel investigation, provisional default)"},
+        // §4.2's InputPreset fallback ladder. R-channel investigation update (2026-07-16,
+        // real-device): InputPreset was never the cause of the R-channel-silent finding —
+        // switching it (Unprocessed <-> Camcorder) made no difference on real hardware,
+        // confirmed with both the built-in mic and an external mic. The actual cause was
+        // PerformanceMode::LowLatency (see below); reverted to Unprocessed-first since
+        // that's genuinely the better default (avoids OS-level AGC fighting this app's own
+        // InputGain/SafetyLimiter — see OboeFullDuplexEngine.h's doc) now that Camcorder's
+        // only justification is gone.
         {oboe::SharingMode::Exclusive, oboe::InputPreset::Unprocessed, "Exclusive+Unprocessed"},
         {oboe::SharingMode::Shared, oboe::InputPreset::Unprocessed, "Shared+Unprocessed (SharingMode fallback)"},
         {oboe::SharingMode::Shared, oboe::InputPreset::VoiceRecognition,
@@ -46,7 +42,17 @@ Result<std::shared_ptr<oboe::AudioStream>, std::string> OboeFullDuplexEngine::op
     for (const Attempt &attempt : attempts) {
         oboe::AudioStreamBuilder builder;
         builder.setDirection(oboe::Direction::Input)
-            ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+            // R-channel investigation (2026-07-16, real-device): the MMAP/low-latency
+            // capture path on this hardware (Sony SO-51C) silently delivers only the
+            // primary mic capsule — L has real signal, R sits at the noise floor
+            // (~-98dBFS) — regardless of InputPreset, and regardless of built-in vs.
+            // external mic, ruling out "the mic itself is mono". Sony's own Video Pro app
+            // gets real stereo because it doesn't use this low-latency path. None (the
+            // legacy/non-MMAP path) trades some input latency for correct stereo capture;
+            // acceptable since A/V sync goes through PtsClockDomain's PTS math, not
+            // wall-clock assumptions about this latency. Monitoring's output stream is
+            // deliberately left on LowLatency below — this only affects capture.
+            ->setPerformanceMode(oboe::PerformanceMode::None)
             ->setSharingMode(attempt.sharingMode)
             ->setFormat(oboe::AudioFormat::Float)
             ->setSampleRate(kSampleRate)
