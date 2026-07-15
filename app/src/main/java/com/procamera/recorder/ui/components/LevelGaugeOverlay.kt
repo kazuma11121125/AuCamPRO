@@ -114,7 +114,25 @@ fun LevelGaugeOverlay(modifier: Modifier = Modifier) {
                 // orientation[2] = roll (radians). Positive here means the device's right
                 // edge (in whichever physical orientation it's currently held) is tilted
                 // down.
-                rollDegrees = Math.toDegrees(orientation[2].toDouble()).toFloat()
+                //
+                // **実機で発見(2026-07-15)**: landscape (ROTATION_90/270, this app's locked
+                // window orientation) reads correctly — extensively validated on real
+                // hardware. Portrait hold (ROTATION_0/180, only reachable by physically
+                // rotating the phone against the locked window — see class doc) read a
+                // constant ~90° when actually level instead of ~0°. Working theory: the
+                // portrait "identity" remap leaves `orientation[2]` measuring roll around
+                // the phone's own long axis (bank like a steering wheel) rather than around
+                // the lens axis (camera bank) — the LANDSCAPE remaps happen to make those
+                // the same axis via their 90° swap, but identity doesn't. Root-caused as a
+                // known-good empirical offset rather than a re-derived remap (the sign for
+                // ROTATION_180 is a mirrored guess, unverified — flip PORTRAIT_OFFSET_DEGREES'
+                // sign for that bucket if it turns out wrong on real-device testing).
+                val portraitOffsetDegrees = when (physicalRotation) {
+                    Surface.ROTATION_0 -> -90f
+                    Surface.ROTATION_180 -> 90f
+                    else -> 0f
+                }
+                rollDegrees = Math.toDegrees(orientation[2].toDouble()).toFloat() + portraitOffsetDegrees
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}

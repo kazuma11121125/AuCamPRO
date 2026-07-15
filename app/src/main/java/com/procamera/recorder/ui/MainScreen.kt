@@ -114,10 +114,18 @@ fun MainScreen(
             .fillMaxSize()
             .background(SurfaceBlack),
     ) {
-        // ── Camera preview (fills entire screen behind everything) ───────────────
+        // ── Preview area (left) + control sidebar (right), side-by-side rather than
+        // sidebar-over-preview — real-device feedback: the sidebar visually covering part
+        // of the frame (even semi-transparent) made it hard to judge the actual shot while
+        // adjusting a slider. weight(1f) on the preview Box means the sidebar's
+        // AnimatedVisibility genuinely reflows/shrinks the preview's available width as it
+        // slides in/out, rather than just drawing on top of it.
+        Row(modifier = Modifier.fillMaxSize()) {
+        // ── Camera preview ─────────────────────────────────────────────────────
         Box(
             modifier = Modifier
-                .fillMaxSize()
+                .weight(1f)
+                .fillMaxHeight()
                 .clickable(
                     interactionSource = androidx.compose.runtime.remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                     indication = null
@@ -230,27 +238,6 @@ fun MainScreen(
                 )
             }
 
-            // Control sidebar — right-docked vertical strip (Sony Video Pro style: the
-            // preview stays visible across its left/majority instead of being covered by a
-            // full-width bottom sheet — see ControlPanel's doc). Slides in from the right
-            // edge rather than expanding vertically, matching the new dock direction.
-            androidx.compose.animation.AnimatedVisibility(
-                visible = state.showControls,
-                enter = androidx.compose.animation.slideInHorizontally(initialOffsetX = { it }) + androidx.compose.animation.fadeIn(),
-                exit = androidx.compose.animation.slideOutHorizontally(targetOffsetX = { it }) + androidx.compose.animation.fadeOut(),
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .fillMaxHeight(),
-            ) {
-                ControlPanel(
-                    state = state,
-                    viewModel = viewModel,
-                    modifier = Modifier
-                        .fillMaxHeight()
-                        .width(300.dp),
-                )
-            }
-
             // REC status — small, always-visible (not gated on state.showControls, unlike
             // the rest of StatusOverlay it used to live inside): recording is now started
             // exclusively via the Xperia hardware camera key (CameraControlViewModel.
@@ -289,6 +276,26 @@ fun MainScreen(
                 RecIndicator(state = state)
             }
         }
+
+        // Control sidebar — right-docked vertical strip (Sony Video Pro style). A Row
+        // sibling of the preview Box above (not an overlay inside it — see this Row's own
+        // doc for why), so its AnimatedVisibility genuinely reflows the preview's available
+        // width rather than just drawing on top of it. Still slides in from the right edge.
+        androidx.compose.animation.AnimatedVisibility(
+            visible = state.showControls,
+            enter = androidx.compose.animation.slideInHorizontally(initialOffsetX = { it }) + androidx.compose.animation.fadeIn(),
+            exit = androidx.compose.animation.slideOutHorizontally(targetOffsetX = { it }) + androidx.compose.animation.fadeOut(),
+            modifier = Modifier.fillMaxHeight(),
+        ) {
+            ControlPanel(
+                state = state,
+                viewModel = viewModel,
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .width(300.dp),
+            )
+        }
+        } // end Row(preview + sidebar)
 
         // ── Error / thermal banners (stacked, error on top) ──────────────────────
         Column(
@@ -617,6 +624,19 @@ private fun CameraControlsPanel(
                     viewModel.setZoom(zoom)
                 },
             )
+        }
+
+        // FPS — display-only (not adjustable here; it's derived from the selected
+        // recording resolution in Settings), placed alongside ISO/SHUTTER per real-device
+        // feedback that it should be visible without checking the top-status readout.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(text = "FPS", color = OnSurfacePrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(text = "${state.fps}fps", color = OnSurfaceSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
         }
 
         // ISO
