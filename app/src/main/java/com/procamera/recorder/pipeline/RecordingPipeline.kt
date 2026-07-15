@@ -167,6 +167,13 @@ class RecordingPipeline(private val context: Context) {
     // Still-photo capture (§Photo mode). Preview-session-only, same reasoning as
     // histogramReader — see startPreview()'s call site and capturePhoto()'s doc.
     private var photoReader: android.media.ImageReader? = null
+    // photoReader's onImageAvailable listener runs savePhotoToMediaStore() — a multi-MB
+    // JPEG buffer read plus a MediaStore/disk write. That listener used to run on
+    // Handler(Looper.getMainLooper()), which is a real ANR/frame-drop risk; it now runs
+    // on this dedicated background thread instead. Owned 1:1 with photoReader — every
+    // place that closes photoReader must also quitSafely() + null this, or the old
+    // thread leaks until the next startPreview() call happens to clean it up.
+    private var photoHandlerThread: android.os.HandlerThread? = null
 
     // User-configurable settings
     private var nextVideoConfig: CameraCapabilityInspector.VideoConfigCandidate? = null
@@ -334,8 +341,11 @@ class RecordingPipeline(private val context: Context) {
             // unproven size here is a real risk on this hardware), falling back to the
             // largest available JPEG size only if that exact one isn't offered.
             photoReader?.close()
+            photoHandlerThread?.quitSafely()
             photoReader = pickPhotoOutputSize(characteristics)?.let { size ->
                 try {
+                    val ht = android.os.HandlerThread("PhotoCapture").apply { start() }
+                    photoHandlerThread = ht
                     android.media.ImageReader.newInstance(
                         size.width, size.height, android.graphics.ImageFormat.JPEG, 2,
                     ).apply {
@@ -349,9 +359,11 @@ class RecordingPipeline(private val context: Context) {
                             } finally {
                                 image.close()
                             }
-                        }, Handler(Looper.getMainLooper()))
+                        }, Handler(ht.looper))
                     }
                 } catch (e: Exception) {
+                    photoHandlerThread?.quitSafely()
+                    photoHandlerThread = null
                     Log.w(TAG, "Photo reader creation failed, continuing without it", e)
                     null
                 }
@@ -382,6 +394,7 @@ class RecordingPipeline(private val context: Context) {
                         Log.w(TAG, "Preview session with extra streams failed, retrying preview-only", e)
                         histogramReader?.close(); histogramReader = null
                         photoReader?.close(); photoReader = null
+                        photoHandlerThread?.quitSafely(); photoHandlerThread = null
                         sessionController.startRepeating(
                             cameraId = lens.cameraId,
                             outputSurfaces = listOf(surface),
@@ -627,6 +640,8 @@ class RecordingPipeline(private val context: Context) {
         histogramReader = null
         photoReader?.close()
         photoReader = null
+        photoHandlerThread?.quitSafely()
+        photoHandlerThread = null
         audioEngineActive = false
         pipelineState = PipelineState.IDLE
     }
