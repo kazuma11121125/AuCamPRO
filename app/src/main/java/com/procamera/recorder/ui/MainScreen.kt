@@ -1,6 +1,10 @@
 package com.procamera.recorder.ui
 
 import android.Manifest
+import android.content.Intent
+import android.graphics.Bitmap
+import android.net.Uri
+import android.provider.MediaStore
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
@@ -35,6 +39,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
@@ -45,13 +50,20 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -210,21 +222,31 @@ fun MainScreen(
                     .height(150.dp),
             )
 
-            // Histogram — bottom-left: the one remaining corner clear of the audio meter
-            // (top-left), level gauge (center), control sidebar (right), and REC status
-            // (bottom-center). Always visible (not gated on state.showControls) to match
-            // the other measurement overlays, though it stops updating once a recording
-            // starts (self-hides via the null check — see HistogramOverlay's doc).
-            //
-            // Collects viewModel.histogramBins itself for the same recomposition-isolation
-            // reason as AudioMeterHost above.
-            HistogramHost(
-                viewModel = viewModel,
+            // Histogram + gallery thumbnail — bottom-left: the one remaining corner clear
+            // of the audio meter (top-left), level gauge (center), control sidebar
+            // (right), and REC status (bottom-center). Always visible (not gated on
+            // state.showControls) to match the other measurement overlays, though the
+            // histogram itself stops updating once a recording starts (self-hides via
+            // the null check — see HistogramOverlay's doc).
+            Row(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .navigationBarsPadding()
                     .padding(start = 8.dp, bottom = 12.dp),
-            )
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                // Collects viewModel.histogramBins itself for the same
+                // recomposition-isolation reason as AudioMeterHost above.
+                HistogramHost(viewModel = viewModel)
+                Spacer(Modifier.width(8.dp))
+                // §ギャラリー連携 — Sony Photo Pro/Video Pro both show a thumbnail of the
+                // last capture in a corner as a shortcut into the system gallery; this
+                // mirrors that (real-device comparison against Photo Pro).
+                GalleryThumbnailButton(
+                    uri = state.lastCapturedUri,
+                    isVideo = state.lastCapturedIsVideo,
+                )
+            }
 
             // Top status overlay on the preview.
             androidx.compose.animation.AnimatedVisibility(
@@ -499,6 +521,65 @@ private fun AudioMeterHost(viewModel: CameraControlViewModel, modifier: Modifier
 private fun HistogramHost(viewModel: CameraControlViewModel, modifier: Modifier = Modifier) {
     val bins by viewModel.histogramBins.collectAsStateWithLifecycle()
     HistogramOverlay(bins = bins, modifier = modifier)
+}
+
+/**
+ * §ギャラリー連携 — small last-capture thumbnail, tap to open it (or the gallery app in
+ * general, if nothing's been captured yet this process) in the system Photos app. Loads
+ * the bitmap via [android.content.ContentResolver.loadThumbnail] (API 29+, matches this
+ * app's minSdk) rather than a full-image decode — cheap enough to redo on every
+ * [uri] change without a caching layer.
+ */
+@Composable
+private fun GalleryThumbnailButton(uri: Uri?, isVideo: Boolean, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    var bitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    LaunchedEffect(uri) {
+        bitmap = if (uri == null) {
+            null
+        } else {
+            try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    context.contentResolver.loadThumbnail(uri, android.util.Size(160, 160), null)
+                }
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .size(40.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .border(1.dp, OnSurfaceSecondary.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+            .background(SurfaceDark)
+            .clickable {
+                val intent = if (uri != null) {
+                    Intent(Intent.ACTION_VIEW).setDataAndType(uri, if (isVideo) "video/*" else "image/*")
+                } else {
+                    // Nothing captured yet this process — open the gallery app's own grid
+                    // rather than a specific item (real camera apps fall back the same way
+                    // when their own "last shot" thumbnail has nothing to point at).
+                    Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+                }
+                context.startActivity(intent)
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        val bmp = bitmap
+        if (bmp != null) {
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        } else {
+            Text(text = "🖼", fontSize = 16.sp)
+        }
+    }
 }
 
 /**

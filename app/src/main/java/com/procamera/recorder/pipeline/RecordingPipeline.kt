@@ -186,6 +186,15 @@ class RecordingPipeline(private val context: Context) {
     var onAutoWbGainsMeasured: ((android.hardware.camera2.params.RggbChannelVector, Double) -> Unit)? = null
     var onAutoFocusMeasured: ((Float) -> Unit)? = null
 
+    // §ギャラリー連携: fires with the MediaStore URI of a newly saved photo, or the last
+    // segment of a newly finished recording — MainScreen's GalleryThumbnailButton uses
+    // this to show/open the most recent capture. Video only fires when [storageLocation]
+    // is [StorageLocation.PublicMovies] (a MediaStore URI) — AppPrivate video files stay
+    // as plain app-private Files with no MediaStore entry to point a thumbnail/viewer
+    // Intent at, and wiring that up would need a FileProvider this app doesn't have yet;
+    // left as a known gap rather than half-built, since PublicMovies is now the default.
+    var onMediaCaptured: ((uri: android.net.Uri, isVideo: Boolean) -> Unit)? = null
+
     // Tap/long-press-to-focus (§4.1) — see [com.procamera.recorder.camera.FocusController]'s
     // doc. (Re)created per [startPreview] since it's bound to that session's
     // CameraCharacteristics/ManualCaptureRequestFactory; torn down alongside the session in
@@ -796,6 +805,7 @@ class RecordingPipeline(private val context: Context) {
         if (segmentFiles.isNullOrEmpty()) return
 
         val resolver = context.contentResolver
+        var lastExportedUri: android.net.Uri? = null
         for (file in segmentFiles) {
             try {
                 val values = ContentValues().apply {
@@ -815,9 +825,16 @@ class RecordingPipeline(private val context: Context) {
                 resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
                 file.delete()
                 Log.i(TAG, "Exported ${file.name} to Movies/ProCamera")
+                lastExportedUri = uri
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to export ${file.name} to MediaStore Movies", e)
             }
+        }
+        // §ギャラリー連携 — the *last* segment stands in for "this take" in the thumbnail
+        // button, matching how a multi-segment recording is a single take from the
+        // user's perspective even though it's several files on disk.
+        lastExportedUri?.let { uri ->
+            Handler(Looper.getMainLooper()).post { onMediaCaptured?.invoke(uri, true) }
         }
     }
 
@@ -897,6 +914,7 @@ class RecordingPipeline(private val context: Context) {
             resolver.openOutputStream(uri)?.use { out -> out.write(bytes) }
             resolver.update(uri, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null)
             Log.i(TAG, "Photo saved: $fileName")
+            Handler(Looper.getMainLooper()).post { onMediaCaptured?.invoke(uri, false) }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save photo", e)
         }

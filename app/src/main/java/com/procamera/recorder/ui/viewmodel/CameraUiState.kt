@@ -149,7 +149,12 @@ enum class FrameLineAspectRatio(val ratio: Float?, val label: String) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 data class SettingsState(
-    val storageLocation: StorageLocation = StorageLocation.AppPrivate,
+    // §ギャラリー連携: PublicMovies rather than AppPrivate — the gallery-thumbnail button
+    // (MainScreen's GalleryThumbnailButton) only has anything to show/open if captures
+    // actually land somewhere MediaStore-visible. A user who explicitly picks AppPrivate
+    // in Settings still gets that choice honored (this only changes the *default* for
+    // anyone who's never saved a preference — see UserPreferencesStore/PersistSnapshot).
+    val storageLocation: StorageLocation = StorageLocation.PublicMovies,
     val segmentDurationMinutes: Int = 5,  // 1, 5, 10, 15, 30
     val frameLineAspectRatio: FrameLineAspectRatio = FrameLineAspectRatio.Off,
     val showSettingsSheet: Boolean = false,
@@ -257,6 +262,14 @@ data class CameraUiState(
 
     // ── Capture mode (§CaptureMode's doc) ────────────────────────────────────
     val captureMode: CaptureMode = CaptureMode.Video,
+
+    // ── Gallery thumbnail (§ギャラリー連携) ──────────────────────────────────
+    // MediaStore URI of the most recently saved photo/video, for MainScreen's
+    // GalleryThumbnailButton. Null until the first capture this process (not persisted
+    // — see RecordingPipeline.onMediaCaptured's doc for why re-deriving it from
+    // MediaStore on launch wasn't worth the complexity for a nice-to-have thumbnail).
+    val lastCapturedUri: android.net.Uri? = null,
+    val lastCapturedIsVideo: Boolean = false,
 ) {
     val isRecording: Boolean get() = recordingState == RecordingUiState.Recording
     val isPreviewing: Boolean get() = recordingState == RecordingUiState.Previewing

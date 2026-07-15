@@ -143,6 +143,9 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
             _uiState.update { it.copy(focusDistanceDiopters = distance, afAuto = false) }
             pipeline.updateCameraParams(_uiState.value.toCameraParams())
         }
+        pipeline.onMediaCaptured = { uri, isVideo ->
+            _uiState.update { it.copy(lastCapturedUri = uri, lastCapturedIsVideo = isVideo) }
+        }
     }
 
     private var meterJob: Job? = null
