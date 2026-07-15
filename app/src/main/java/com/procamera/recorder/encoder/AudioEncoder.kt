@@ -64,7 +64,29 @@ class AudioEncoder(
         drainThread = thread(name = "AudioEncoderDrain", priority = Thread.NORM_PRIORITY) { drainLoop() }
     }
 
+    /**
+     * Real-device finding: [NativeEngineBridge]'s input stream now outlives individual
+     * recordings (started once at preview, kept running across record start/stop for
+     * continuous metering — see [com.procamera.recorder.pipeline.RecordingPipeline
+     * .ensureAudioEngineStarted]'s doc). That means by the time a *second-or-later*
+     * recording's [AudioEncoder] starts, the ring buffer can be holding a stale backlog —
+     * up to its ~10s capacity, frozen there since nothing drained it during preview-only
+     * (or nothing at all if preview ran long enough to overflow it, silently dropping
+     * every write since as an overrun; see SpscRingBuffer's write()). Confirmed on a real
+     * device: a recording started ~87s into preview lost effectively all of its audio
+     * (0.064s out of a 30s take) — [cumulativeSampleCount] started at 0 while the anchor
+     * below correctly points at the *stream's* true frame 0 (up to 87s earlier), so every
+     * PTS this encoder computed landed far in the past relative to recordingStartNanos and
+     * was silently dropped by [PtsClockDomain.normalizeAudioPtsUs]'s monotonic guard until
+     * enough frames drained to close that gap — which for a short recording never happens.
+     *
+     * Fixed by (1) flushing the stale backlog so draining starts from "now", and (2)
+     * seeding [cumulativeSampleCount] from the correlation's own frame position instead of
+     * 0, so it lines up with the same frame-0 the anchor below is computed against.
+     */
     private fun seedAudioAnchor() {
+        nativeEngine.flushRingBuffer()
+
         // Captured BEFORE the retry loop, not after: the ring buffer has been filling
         // since nativeEngine.start() (called by our caller before this), so if correlation
         // fails, "now" at the *start* of this method is a much closer approximation of
@@ -76,6 +98,9 @@ class AudioEncoder(
             if (correlation != null) {
                 val (framePosition, timeNanos) = correlation
                 ptsClockDomain.startAudioAnchorFromFrameCorrelation(framePosition, timeNanos, sampleRateHz)
+                // Aligns this encoder's own frame counter to the stream's true position
+                // (this method's doc) rather than assuming draining starts at frame 0.
+                cumulativeSampleCount = framePosition
                 return
             }
             Thread.sleep(ANCHOR_CORRELATION_RETRY_SLEEP_MS)
@@ -84,6 +109,8 @@ class AudioEncoder(
         // engine hasn't produced its first input callback yet) — fall back to wall-clock
         // anchoring so recording doesn't hard-fail, at the cost of reintroducing the
         // input-latency offset (see PtsClockDomain.startAudioAnchor's doc).
+        // cumulativeSampleCount is left at 0 here — consistent with this fallback also
+        // treating "now" (fallbackAnchorNanos) as sample 0.
         Log.w(TAG, "getInputTimestamp() never returned a correlation after " +
             "$ANCHOR_CORRELATION_MAX_ATTEMPTS attempts; falling back to wall-clock audio anchor " +
             "(A/V sync may be off by the audio input pipeline's latency)")
@@ -115,15 +142,26 @@ class AudioEncoder(
                 }
                 val sampleCount = framesRead * channelCount
 
-                PcmDither.floatToInt16Tpdf(
-                    input = floatScratch.copyOf(sampleCount),
-                    output = if (sampleCount == shortScratch.size) shortScratch else ShortArray(sampleCount),
-                )
+                // In place on the reused scratch buffers, converting only the first
+                // sampleCount elements — framesRead is rarely a full FRAMES_PER_BLOCK (the
+                // native ring buffer's available frames vary block to block), so a naive
+                // size-matched output buffer would only ever be `shortScratch` itself on
+                // the rare exact-size block; every other block previously got a throwaway
+                // array that the read loop below never actually read from, silently
+                // feeding the encoder stale/reused shortScratch content instead of the
+                // just-converted samples (real-device finding: this is what made recorded
+                // audio sound like garbled noise rather than the captured signal).
+                PcmDither.floatToInt16Tpdf(floatScratch, shortScratch, sampleCount)
 
                 val ptsUs = ptsClockDomain.normalizeAudioPtsUs(cumulativeSampleCount, sampleRateHz)
                 cumulativeSampleCount += framesRead
                 if (ptsUs == null) {
-                    continue // non-monotonic (shouldn't happen for a purely-increasing counter, but guarded per §4.3)
+                    // Non-monotonic (shouldn't happen for a purely-increasing counter, but
+                    // guarded per §4.3) — logged rather than silently dropped: this exact
+                    // silent path is what hid the seedAudioAnchor bug (see its doc) until a
+                    // real-device file-level check caught the missing audio.
+                    Log.w(TAG, "Audio frame dropped: PTS not monotonic (cumulativeSampleCount=$cumulativeSampleCount)")
+                    continue
                 }
 
                 byteScratch.clear()

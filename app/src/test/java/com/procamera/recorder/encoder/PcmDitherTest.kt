@@ -10,7 +10,7 @@ class PcmDitherTest {
     fun silence_producesOutputWithinDitherNoiseFloor() {
         val input = FloatArray(1000) { 0f }
         val output = ShortArray(1000)
-        PcmDither.floatToInt16Tpdf(input, output, Random(42))
+        PcmDither.floatToInt16Tpdf(input, output, input.size, Random(42))
         // TPDF dither for a sum of two uniform[-0.5,0.5) is bounded in [-1, 1]; silence
         // input must never produce anything beyond that dither noise floor.
         for (sample in output) {
@@ -22,7 +22,7 @@ class PcmDitherTest {
     fun fullScalePositive_mapsNearShortMaxWithoutOverflowWraparound() {
         val input = FloatArray(100) { 1.0f }
         val output = ShortArray(100)
-        PcmDither.floatToInt16Tpdf(input, output, Random(1))
+        PcmDither.floatToInt16Tpdf(input, output, input.size, Random(1))
         for (sample in output) {
             // Must clamp at Short.MAX_VALUE, never wrap around to negative.
             assertThat(sample.toInt()).isGreaterThan(32760)
@@ -34,7 +34,7 @@ class PcmDitherTest {
     fun fullScaleNegative_mapsNearShortMinWithoutOverflowWraparound() {
         val input = FloatArray(100) { -1.0f }
         val output = ShortArray(100)
-        PcmDither.floatToInt16Tpdf(input, output, Random(2))
+        PcmDither.floatToInt16Tpdf(input, output, input.size, Random(2))
         for (sample in output) {
             assertThat(sample.toInt()).isLessThan(-32760)
             assertThat(sample.toInt()).isAtLeast(Short.MIN_VALUE.toInt())
@@ -50,7 +50,7 @@ class PcmDitherTest {
         // large negative number instead).
         val input = floatArrayOf(5.0f, -5.0f, 100.0f, -100.0f)
         val output = ShortArray(4)
-        PcmDither.floatToInt16Tpdf(input, output, Random(3))
+        PcmDither.floatToInt16Tpdf(input, output, input.size, Random(3))
         assertThat(output[0].toInt()).isGreaterThan(32760)
         assertThat(output[1].toInt()).isLessThan(-32760)
         assertThat(output[2].toInt()).isGreaterThan(32760)
@@ -67,21 +67,37 @@ class PcmDitherTest {
         val lsbFraction = 0.2f / 32767.0f
         val input = FloatArray(2000) { lsbFraction }
         val output = ShortArray(2000)
-        PcmDither.floatToInt16Tpdf(input, output, Random(7))
+        PcmDither.floatToInt16Tpdf(input, output, input.size, Random(7))
 
         val distinctValues = output.toSet()
         assertThat(distinctValues.size).isGreaterThan(1)
     }
 
     @Test
-    fun requireSameSizeArrays_throws() {
+    fun outputTooSmallForSampleCount_throws() {
         val input = FloatArray(10)
         val output = ShortArray(5)
         try {
-            PcmDither.floatToInt16Tpdf(input, output)
+            PcmDither.floatToInt16Tpdf(input, output, sampleCount = 10)
             throw AssertionError("expected IllegalArgumentException")
         } catch (_: IllegalArgumentException) {
             // expected
+        }
+    }
+
+    @Test
+    fun sampleCountSmallerThanBuffers_onlyConvertsPrefix() {
+        // The real bug this signature exists to prevent (see AudioEncoder's git history):
+        // callers must be able to reuse fixed-size scratch buffers and convert only the
+        // first sampleCount elements, with the rest of output left untouched.
+        val input = FloatArray(10) { 1.0f }
+        val output = ShortArray(10) { 999 }
+        PcmDither.floatToInt16Tpdf(input, output, sampleCount = 4)
+        for (i in 0 until 4) {
+            assertThat(output[i].toInt()).isGreaterThan(32760)
+        }
+        for (i in 4 until 10) {
+            assertThat(output[i].toInt()).isEqualTo(999)
         }
     }
 }

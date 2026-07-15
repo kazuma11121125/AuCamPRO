@@ -1078,6 +1078,31 @@ private fun AudioControlsPanel(
             .fillMaxWidth()
             .padding(vertical = 8.dp),
     ) {
+        // USB Audio > 有線 > 内蔵 優先ルーティング(§4.2)の実際の着地先 — see
+        // AudioDeviceRouter's doc for why this shows what was actually opened, not just
+        // what was requested.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "INPUT",
+                color = OnSurfaceSecondary,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 1.sp,
+            )
+            Text(
+                text = state.audioInputDeviceLabel,
+                color = OnSurfacePrimary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+
         // xRun / overrun stats — collects viewModel.meterState itself (see AudioStatsRow's
         // doc) so this ~30Hz churn only recomposes this one row, not the EQ sliders below.
         AudioStatsRow(viewModel = viewModel)

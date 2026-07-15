@@ -15,14 +15,19 @@ import kotlin.random.Random
 object PcmDither {
 
     /**
-     * Converts [input] (range approximately [-1,1], values outside are clamped) into
-     * [output] (must be the same size). [random] is injectable for deterministic tests;
-     * production callers should use a single long-lived instance across calls (not
+     * Converts the first [sampleCount] elements of [input] (range approximately [-1,1],
+     * values outside are clamped) into [output] in place — both must be sized >=
+     * [sampleCount], letting callers reuse fixed-size scratch buffers across blocks of
+     * varying length instead of reallocating (or, worse, allocating a throwaway output
+     * array whose result then never gets read — the real-device bug this signature
+     * replaces; see AudioEncoder's git history). [random] is injectable for deterministic
+     * tests; production callers should use a single long-lived instance across calls (not
      * reseed per-block) so the dither sequence doesn't repeat in an audible pattern.
      */
-    fun floatToInt16Tpdf(input: FloatArray, output: ShortArray, random: Random = Random.Default) {
-        require(input.size == output.size) { "input/output size mismatch: ${input.size} vs ${output.size}" }
-        for (i in input.indices) {
+    fun floatToInt16Tpdf(input: FloatArray, output: ShortArray, sampleCount: Int, random: Random = Random.Default) {
+        require(input.size >= sampleCount) { "input too small: ${input.size} < $sampleCount" }
+        require(output.size >= sampleCount) { "output too small: ${output.size} < $sampleCount" }
+        for (i in 0 until sampleCount) {
             val clamped = input[i].coerceIn(-1f, 1f)
             val scaled = clamped * SCALE
 

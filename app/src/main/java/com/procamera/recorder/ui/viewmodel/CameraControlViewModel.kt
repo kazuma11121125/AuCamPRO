@@ -146,6 +146,17 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         pipeline.onMediaCaptured = { uri, isVideo ->
             _uiState.update { it.copy(lastCapturedUri = uri, lastCapturedIsVideo = isVideo) }
         }
+        // USB Audio > 有線 > 内蔵 優先ルーティング(§4.2) — see AudioDeviceRouter's doc.
+        pipeline.onAudioInputDeviceChanged = { label ->
+            _uiState.update { it.copy(audioInputDeviceLabel = label) }
+        }
+        // §4.5 モニタリング再生: pipeline is the source of truth for whether monitoring is
+        // actually on (a toggle-on request can be rejected, or auto-reverted on headphone
+        // unplug — see RecordingPipeline.setMonitoringEnabled's doc), so the switch reflects
+        // this callback rather than the tap that triggered it.
+        pipeline.onMonitoringEnabledChanged = { enabled ->
+            _uiState.update { it.copy(monitoringEnabled = enabled) }
+        }
         // §フォーカス位置表示: shows immediately at Scanning, then auto-hides a couple
         // seconds after the scan resolves (Locked/Failed) — a real camera's focus
         // reticle doesn't stay on screen forever once it's told you what you need to
@@ -287,6 +298,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         if (!saved.wbAuto) saved.kelvin?.let(::setKelvin)
         setAfAuto(saved.afAuto)
         setFrameLineAspectRatio(saved.frameLineAspectRatio)
+        setAudioInputPreference(saved.audioInputPreference)
         setInputGainDb(saved.inputGainDb)
         setMonitoringEnabled(saved.monitoringEnabled)
         setStorageLocation(saved.storageLocation)
@@ -602,8 +614,9 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         setEqBand(bandIndex, band.freqHz, q, band.gainDb)
     }
 
+    /** State updates via [pipeline]'s `onMonitoringEnabledChanged` callback, not here
+     * directly — a request can be rejected (no headphone-type output connected). */
     fun setMonitoringEnabled(enabled: Boolean) {
-        _uiState.update { it.copy(monitoringEnabled = enabled) }
         pipeline.setMonitoringEnabled(enabled)
     }
 
@@ -647,6 +660,12 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun setFrameLineAspectRatio(ratio: FrameLineAspectRatio) {
         _uiState.update { it.copy(settings = it.settings.copy(frameLineAspectRatio = ratio)) }
+    }
+
+    /** Settings sheet mic picker (§4.2) — see [com.procamera.recorder.audio.AudioDeviceRouter.InputKind]'s doc. */
+    fun setAudioInputPreference(kind: com.procamera.recorder.audio.AudioDeviceRouter.InputKind) {
+        _uiState.update { it.copy(settings = it.settings.copy(audioInputPreference = kind)) }
+        pipeline.setPreferredInputKind(kind)
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -824,6 +843,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         val wbAuto: Boolean,
         val afAuto: Boolean,
         val frameLineAspectRatio: FrameLineAspectRatio,
+        val audioInputPreference: com.procamera.recorder.audio.AudioDeviceRouter.InputKind,
         val inputGainDb: Float,
         val monitoringEnabled: Boolean,
         val storageLocation: StorageLocation,
@@ -840,6 +860,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
             wbAuto = state.wbAuto,
             afAuto = state.afAuto,
             frameLineAspectRatio = state.settings.frameLineAspectRatio,
+            audioInputPreference = state.settings.audioInputPreference,
             inputGainDb = state.inputGainDb,
             monitoringEnabled = state.monitoringEnabled,
             storageLocation = state.settings.storageLocation,

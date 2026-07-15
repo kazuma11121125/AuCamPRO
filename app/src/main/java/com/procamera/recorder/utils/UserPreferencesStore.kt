@@ -3,6 +3,7 @@ package com.procamera.recorder.utils
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
+import com.procamera.recorder.audio.AudioDeviceRouter
 import com.procamera.recorder.ui.viewmodel.CameraUiState
 import com.procamera.recorder.ui.viewmodel.EqBandState
 import com.procamera.recorder.ui.viewmodel.FrameLineAspectRatio
@@ -34,6 +35,7 @@ class UserPreferencesStore(context: Context) {
         val wbAuto: Boolean,
         val afAuto: Boolean,
         val frameLineAspectRatio: FrameLineAspectRatio,
+        val audioInputPreference: AudioDeviceRouter.InputKind,
         val inputGainDb: Float,
         val monitoringEnabled: Boolean,
         val storageLocation: StorageLocation,
@@ -55,6 +57,9 @@ class UserPreferencesStore(context: Context) {
         frameLineAspectRatio = prefs.getString(KEY_FRAME_LINE, null)
             ?.let { name -> FrameLineAspectRatio.entries.firstOrNull { it.name == name } }
             ?: FrameLineAspectRatio.Off,
+        audioInputPreference = prefs.getString(KEY_AUDIO_INPUT_PREFERENCE, null)
+            ?.let { name -> AudioDeviceRouter.InputKind.entries.firstOrNull { it.name == name } }
+            ?: AudioDeviceRouter.InputKind.Auto,
         inputGainDb = prefs.getFloat(KEY_INPUT_GAIN, 0f),
         monitoringEnabled = prefs.getBoolean(KEY_MONITORING, false),
         storageLocation = loadStorageLocation(),
@@ -105,6 +110,7 @@ class UserPreferencesStore(context: Context) {
             putBoolean(KEY_WB_AUTO, state.wbAuto)
             putBoolean(KEY_AF_AUTO, state.afAuto)
             putString(KEY_FRAME_LINE, state.settings.frameLineAspectRatio.name)
+            putString(KEY_AUDIO_INPUT_PREFERENCE, state.settings.audioInputPreference.name)
             putFloat(KEY_INPUT_GAIN, state.inputGainDb)
             putBoolean(KEY_MONITORING, state.monitoringEnabled)
             putInt(KEY_SEGMENT_MINUTES, state.settings.segmentDurationMinutes)
@@ -145,6 +151,7 @@ class UserPreferencesStore(context: Context) {
         const val KEY_WB_AUTO = "wb_auto"
         const val KEY_AF_AUTO = "af_auto"
         const val KEY_FRAME_LINE = "frame_line_aspect_ratio"
+        const val KEY_AUDIO_INPUT_PREFERENCE = "audio_input_preference"
         const val KEY_INPUT_GAIN = "input_gain_db"
         const val KEY_MONITORING = "monitoring_enabled"
         const val KEY_SEGMENT_MINUTES = "segment_duration_minutes"

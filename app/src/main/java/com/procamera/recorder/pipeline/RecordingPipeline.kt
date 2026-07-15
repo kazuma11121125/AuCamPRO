@@ -13,6 +13,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
 import androidx.annotation.RequiresPermission
+import com.procamera.recorder.audio.AudioDeviceRouter
 import com.procamera.recorder.audio.NativeEngineBridge
 import com.procamera.recorder.camera.CameraCapabilityInspector
 import com.procamera.recorder.camera.CameraParams
@@ -133,20 +134,155 @@ class RecordingPipeline(private val context: Context) {
     val nativeEngine = NativeEngineBridge()
     private var audioEngineActive = false
 
+    // USB Audio > 有線 Headset > 内蔵 Mic priority routing (§4.2) — see AudioDeviceRouter's
+    // doc for why the fallback-through-candidates loop below lives here rather than in the
+    // native layer. Registered for the pipeline's whole lifetime (not just while the audio
+    // engine is active) so a device plugged in before the first startPreview() is already
+    // known; unregistered in stopAll().
+    private val audioDeviceRouter = AudioDeviceRouter(context)
+    private var activeInputDeviceId: Int = 0 // 0 == oboe::kUnspecified
+
+    // User's manual mic override (Settings sheet) — Auto keeps the USB > 有線 > 内蔵
+    // priority; the others pin one kind to the front of candidateInputDevices() without
+    // dropping the fallback chain (see AudioDeviceRouter.candidateInputDevices's doc), so
+    // e.g. selecting "USB Audio" with nothing plugged in still records from whatever's
+    // actually connected rather than silently recording nothing.
+    private var preferredInputKind: AudioDeviceRouter.InputKind = AudioDeviceRouter.InputKind.Auto
+
+    /** Settings sheet mic picker. Re-evaluates immediately if the audio engine is already
+     * running (recording or previewing); otherwise just takes effect at the next
+     * [ensureAudioEngineStarted]. */
+    fun setPreferredInputKind(kind: AudioDeviceRouter.InputKind) {
+        if (preferredInputKind == kind) return
+        preferredInputKind = kind
+        onAudioDeviceSetChanged()
+    }
+
+    /** Fires with a human-readable label (§4.5 "現在の入力デバイス表示") whenever the
+     * actually-opened input device changes — at [ensureAudioEngineStarted] time and on
+     * every hot-swap. Lets the UI show what the router *actually* landed on, not just
+     * what it requested (the only way to tell a USB interface that silently failed to
+     * open apart from one that's genuinely in use). */
+    var onAudioInputDeviceChanged: ((String) -> Unit)? = null
+
+    // Whether live monitoring is actually running right now — the single source of truth
+    // [onMonitoringEnabledChanged] reports from, since a toggle-on request can be rejected
+    // (see setMonitoringEnabled's doc) or auto-reverted on hot-swap (onAudioDeviceSetChanged).
+    private var monitoringActive = false
+
+    /** Fires whenever monitoring's actual on/off state changes — at [setMonitoringEnabled]
+     * time (including a rejected enable request, so the UI toggle snaps back) and whenever
+     * a headphone-type output is unplugged mid-monitoring. The UI should treat this as the
+     * source of truth for the monitoring switch rather than echoing its own toggle. */
+    var onMonitoringEnabledChanged: ((Boolean) -> Unit)? = null
+
+    init {
+        audioDeviceRouter.register { onAudioDeviceSetChanged() }
+    }
+
     /** Idempotent: safe to call even if already running (e.g. recording starting from an
-     * already-active preview). */
+     * already-active preview). Tries each candidate device in priority order, falling
+     * back to the next on failure, then finally to "let the OS choose" — see
+     * AudioDeviceRouter's doc for why this loop (not the native layer) is what prevents a
+     * USB interface that fails to open from regressing a previously-working built-in mic. */
     private fun ensureAudioEngineStarted(): String? {
         if (audioEngineActive) return null
-        val error = nativeEngine.start()
-        if (error == null) audioEngineActive = true
-        return error
+        for (device in audioDeviceRouter.candidateInputDevices(preferredInputKind)) {
+            val error = nativeEngine.start(device.id)
+            if (error == null) {
+                audioEngineActive = true
+                activeInputDeviceId = device.id
+                notifyInputDeviceChanged(device)
+                return null
+            }
+            Log.w(TAG, "Audio engine failed to start on ${audioDeviceRouter.labelFor(device)} (id=${device.id}): $error")
+        }
+        val fallbackError = nativeEngine.start()
+        if (fallbackError == null) {
+            audioEngineActive = true
+            activeInputDeviceId = 0
+            notifyInputDeviceChanged(null)
+        }
+        return fallbackError
     }
 
     private fun stopAudioEngineIfActive() {
         if (audioEngineActive) {
             nativeEngine.stop()
             audioEngineActive = false
+            activeInputDeviceId = 0
+            if (monitoringActive) {
+                monitoringActive = false
+                notifyMonitoringChanged(false)
+            }
         }
+    }
+
+    private fun notifyInputDeviceChanged(device: android.media.AudioDeviceInfo?) {
+        val label = audioDeviceRouter.labelFor(device)
+        Handler(Looper.getMainLooper()).post { onAudioInputDeviceChanged?.invoke(label) }
+    }
+
+    /**
+     * §4.2 device hot-swap + [setPreferredInputKind]: fires whenever AudioManager reports
+     * *any* device added/removed — input (e.g. a USB interface plugged/unplugged
+     * mid-recording) or output (e.g. monitoring headphones unplugged) — or the user
+     * changes the mic picker in Settings. Handles two independent concerns off that one
+     * signal, since [AudioDeviceRouter.register] only allows a single callback:
+     *
+     * 1. **Input routing**: no-op if the audio engine isn't running yet, or if the
+     *    highest-priority candidate hasn't actually changed (e.g. a *lower*-priority
+     *    device was plugged in while USB is already active). Falls back through the
+     *    remaining candidates on failure, same reasoning as [ensureAudioEngineStarted].
+     *
+     *    **実機未検証**: [insertSilence]'s frame count only approximates the true capture
+     *    gap with the wall-clock time this method itself takes to reopen the stream — no
+     *    hardware is available in this dev environment to verify that approximation
+     *    against a real device unplug. It keeps Audio PTS's cumulative-sample-count basis
+     *    (§4.3) monotonically advancing through the switch rather than jumping backward
+     *    relative to Video PTS, which is the property that actually matters; exact
+     *    silence-duration accuracy is a secondary concern for what is meant to be a rare,
+     *    brief event.
+     *
+     * 2. **Monitoring safety**: if monitoring is currently on and the headphone-type
+     *    output that made it safe to enable (see [setMonitoringEnabled]'s doc) just
+     *    disappeared, force it off rather than letting it silently fall back to the
+     *    built-in speaker and feed back into the mic.
+     */
+    private fun onAudioDeviceSetChanged() {
+        if (monitoringActive && !audioDeviceRouter.hasSafeMonitoringOutput()) {
+            Log.w(TAG, "Monitoring output device disconnected; disabling monitoring to avoid mic feedback")
+            nativeEngine.setMonitoringEnabled(false)
+            monitoringActive = false
+            notifyMonitoringChanged(false)
+        }
+
+        if (!audioEngineActive) return
+        val candidates = audioDeviceRouter.candidateInputDevices(preferredInputKind)
+        val preferred = candidates.firstOrNull() ?: return
+        if (preferred.id == activeInputDeviceId) return
+
+        Log.i(TAG, "Input device set changed, switching to ${audioDeviceRouter.labelFor(preferred)} (id=${preferred.id})")
+        val gapStartNanos = System.nanoTime()
+        var opened: android.media.AudioDeviceInfo? = null
+        for (device in candidates) {
+            val error = nativeEngine.reopenInputStream(device.id)
+            if (error == null) {
+                opened = device
+                break
+            }
+            Log.w(TAG, "reopenInputStream failed on ${audioDeviceRouter.labelFor(device)} (id=${device.id}): $error")
+        }
+        if (opened == null) {
+            Log.e(TAG, "All candidate input devices failed to reopen after a device change; keeping the previous stream closed")
+            return
+        }
+
+        val gapNanos = System.nanoTime() - gapStartNanos
+        val gapFrames = (gapNanos * AUDIO_SAMPLE_RATE_HZ / 1_000_000_000L).toInt()
+        nativeEngine.insertSilence(gapFrames)
+        activeInputDeviceId = opened.id
+        notifyInputDeviceChanged(opened)
     }
 
     // ──────────────────────────────────────────────────────────────────────────────
@@ -680,6 +816,7 @@ class RecordingPipeline(private val context: Context) {
             if (gotLock) sessionMutex.unlock()
         }
         nativeEngine.close()
+        audioDeviceRouter.unregister()
         orientationTracker.stop()
         histogramReader?.close()
         histogramReader = null
@@ -729,9 +866,28 @@ class RecordingPipeline(private val context: Context) {
         nativeEngine.setInputGainDb(gainDb)
     }
 
+    /**
+     * §4.5 "モニタリング再生". Rejects an enable request (leaving monitoring off and
+     * reporting that via [onMonitoringEnabledChanged]) unless a headphone-type output is
+     * currently connected — see [AudioDeviceRouter.hasSafeMonitoringOutput]'s doc for why:
+     * monitoring through the built-in speaker while recording from the mic would feed the
+     * speaker's own output back into the mic. Already-enabled monitoring is also force-off
+     * if that output later disappears — see [onAudioDeviceSetChanged].
+     */
     fun setMonitoringEnabled(enabled: Boolean, outputDeviceId: Int = 0) {
+        if (enabled && !audioDeviceRouter.hasSafeMonitoringOutput()) {
+            Log.w(TAG, "setMonitoringEnabled(true) rejected: no headphone-type output connected (would risk mic feedback)")
+            notifyMonitoringChanged(false)
+            return
+        }
         val error = nativeEngine.setMonitoringEnabled(enabled, outputDeviceId)
         if (error != null) Log.w(TAG, "setMonitoringEnabled($enabled) returned error: $error")
+        monitoringActive = enabled && error == null
+        notifyMonitoringChanged(monitoringActive)
+    }
+
+    private fun notifyMonitoringChanged(enabled: Boolean) {
+        Handler(Looper.getMainLooper()).post { onMonitoringEnabledChanged?.invoke(enabled) }
     }
 
     /**

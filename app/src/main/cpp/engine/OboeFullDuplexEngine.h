@@ -105,6 +105,21 @@ public:
     // the ring buffer; returns the number of frames actually read.
     size_t drainEncoderBuffer(float *dst, size_t maxFrames);
 
+    // UI/coroutine thread only, before an Audio Encoder starts draining. Discards whatever
+    // is currently sitting in the ring buffer (§4.2's persistent audio engine means it may
+    // hold a stale backlog — up to kRingBufferCapacityFrames worth, frozen there since
+    // nothing drains it during preview-only — or nothing at all if preview ran long enough
+    // to overflow it and every write since has been silently dropped as an overrun). Either
+    // way, a fresh AudioEncoder must start its cumulative-sample-count basis (§4.3) from the
+    // stream's *current* frame position (see getInputTimestamp's framePosition), not from
+    // whatever stale data happened to be sitting here — otherwise the PTS this recording
+    // computes for its first frames lands seconds-to-minutes in the past relative to
+    // recordingStartNanos and normalizeAudioPtsUs's monotonic guard silently drops them
+    // until enough new frames drain to close that gap, which for a long preview-then-record
+    // gap can silently eat the entire recording (real-device finding, see
+    // docs/ARCHITECTURE.md).
+    void flushRingBuffer();
+
     // oboe::AudioStreamDataCallback
     oboe::DataCallbackResult onAudioReady(oboe::AudioStream *stream, void *audioData, int32_t numFrames) override;
 

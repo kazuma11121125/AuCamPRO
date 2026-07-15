@@ -133,4 +133,11 @@ JNIEXPORT jint JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nati
     return static_cast<jint>(framesRead);
 }
 
+// Discards any stale backlog before a fresh AudioEncoder starts draining. See
+// OboeFullDuplexEngine::flushRingBuffer's doc.
+JNIEXPORT void JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nativeFlushRingBuffer(
+    JNIEnv *, jobject, jlong handle) {
+    toEngine(handle)->flushRingBuffer();
+}
+
 }  // extern "C"

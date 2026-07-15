@@ -280,6 +280,8 @@ size_t OboeFullDuplexEngine::drainEncoderBuffer(float *dst, size_t maxFrames) {
     return ringBuffer_.read(dst, maxFrames * kChannelCount) / kChannelCount;
 }
 
+void OboeFullDuplexEngine::flushRingBuffer() { ringBuffer_.clear(); }
+
 oboe::DataCallbackResult OboeFullDuplexEngine::onAudioReady(oboe::AudioStream * /*stream*/, void *audioData,
                                                               int32_t numFrames) {
     auto *samples = static_cast<float *>(audioData);

@@ -64,6 +64,10 @@ class NativeEngineBridge : AutoCloseable {
     /** Drains up to [maxFrames] stereo frames into [dst] (must be sized >= maxFrames*2). */
     fun drainEncoderBuffer(dst: FloatArray, maxFrames: Int): Int = nativeDrainEncoderBuffer(handle, dst, maxFrames)
 
+    /** Discards any stale backlog (see `OboeFullDuplexEngine::flushRingBuffer`'s doc) —
+     * call before a fresh [com.procamera.recorder.encoder.AudioEncoder] starts draining. */
+    fun flushRingBuffer() = nativeFlushRingBuffer(handle)
+
     override fun close() {
         if (!closed) {
             nativeStop(handle)
@@ -95,4 +99,5 @@ class NativeEngineBridge : AutoCloseable {
     private external fun nativeHardwareXRunCount(handle: Long): Int
     private external fun nativeGetInputTimestamp(handle: Long): LongArray?
     private external fun nativeDrainEncoderBuffer(handle: Long, dst: FloatArray, maxFrames: Int): Int
+    private external fun nativeFlushRingBuffer(handle: Long)
 }

@@ -1,6 +1,7 @@
 package com.procamera.recorder.ui.viewmodel
 
 import android.net.Uri
+import com.procamera.recorder.audio.AudioDeviceRouter
 import com.procamera.recorder.camera.CameraCapabilityInspector
 import com.procamera.recorder.camera.CaptureRangeClamper
 import com.procamera.recorder.camera.FocusController
@@ -176,6 +177,8 @@ data class SettingsState(
     val storageLocation: StorageLocation = StorageLocation.PublicMovies,
     val segmentDurationMinutes: Int = 5,  // 1, 5, 10, 15, 30
     val frameLineAspectRatio: FrameLineAspectRatio = FrameLineAspectRatio.Off,
+    /** Manual mic override (§4.2) — see [AudioDeviceRouter.InputKind]'s doc. */
+    val audioInputPreference: AudioDeviceRouter.InputKind = AudioDeviceRouter.InputKind.Auto,
     val showSettingsSheet: Boolean = false,
 )
 
@@ -247,6 +250,11 @@ data class CameraUiState(
     // ── Audio status (monitoringEnabled only — meter/xrun live in [AudioMeterUiState],
     // a separate StateFlow; see that class's doc for why) ──────────────────────
     val monitoringEnabled: Boolean = false,
+
+    /** Human-readable label (§4.5 "現在の入力デバイス表示") for whichever input device
+     * [com.procamera.recorder.audio.AudioDeviceRouter] actually landed on — "USB Audio" /
+     * "有線ヘッドセット" / "内蔵マイク" / "既定" before the audio engine has started once. */
+    val audioInputDeviceLabel: String = "既定",
 
     // ── Input gain (record level) ───────────────────────────────────────────
     // Post-ADC digital gain, applied before EQ/limiter — see dsp/InputGain.h. Range is

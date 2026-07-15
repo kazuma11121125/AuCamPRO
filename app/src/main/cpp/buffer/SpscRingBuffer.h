@@ -107,6 +107,15 @@ public:
 
     size_t availableToWrite() const { return capacity_ - availableToRead(); }
 
+    // Consumer-only. Discards whatever is currently buffered by jumping readIndex_ to the
+    // producer's most recent writeIndex_ — safe with respect to a concurrently writing
+    // producer (same release/acquire contract as read()), just not with a second concurrent
+    // consumer. Used to drop a stale backlog before a fresh consumer starts reading (see
+    // OboeFullDuplexEngine::flushRingBuffer's doc for why this exists).
+    void clear() {
+        readIndex_.store(writeIndex_.load(std::memory_order_acquire), std::memory_order_release);
+    }
+
 private:
     static constexpr size_t kCacheLineSize = 64;
 

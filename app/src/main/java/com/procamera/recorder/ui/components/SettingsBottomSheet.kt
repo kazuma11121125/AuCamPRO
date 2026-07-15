@@ -167,6 +167,42 @@ fun SettingsBottomSheet(
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            // Mic selection (§4.2) — Auto follows the USB > 有線 > 内蔵 priority;
+            // AudioDeviceRouter still falls back through the other kinds if the picked one
+            // isn't actually connected right now (see its doc), so picking e.g. "USB
+            // Audio" with nothing plugged in never means recording silently drops to no
+            // mic — the Audio panel's INPUT row shows what actually got used.
+            Text(
+                text = "マイク入力",
+                color = OnSurfaceSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            com.procamera.recorder.audio.AudioDeviceRouter.InputKind.entries.forEach { kind ->
+                val isSelected = state.settings.audioInputPreference == kind
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { viewModel.setAudioInputPreference(kind) }
+                        .padding(vertical = 8.dp)
+                ) {
+                    RadioButton(
+                        selected = isSelected,
+                        onClick = null,
+                        colors = RadioButtonDefaults.colors(selectedColor = Amber)
+                    )
+                    Text(
+                        text = kind.label,
+                        color = if (isSelected) OnSurfacePrimary else OnSurfaceSecondary,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
