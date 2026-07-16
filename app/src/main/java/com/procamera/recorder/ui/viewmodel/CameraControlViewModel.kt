@@ -313,13 +313,27 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
             it.width == saved.videoConfigWidth && it.height == saved.videoConfigHeight &&
                 it.frameRate == saved.videoConfigFps
         }
-        if (savedConfig != null) selectVideoConfig(savedConfig)
 
+        // **実機で発見(2026-07-16)**: this used to call `selectVideoConfig(savedConfig)`
+        // unconditionally right here, before the lens branch below. That raced exactly the
+        // same hazard [switchLens]'s own doc already describes for zoom — `switchLens`
+        // launches its own coroutine that (once `startPreview` resolves) unconditionally
+        // resets `selectedVideoConfig` to `supportedConfigs.firstOrNull()` (the default,
+        // e.g. 4K) — and since that reset lands *after* this method's synchronous
+        // `selectVideoConfig` call, it silently clobbered the just-restored resolution
+        // whenever the saved lens differed from the default one. Confirmed on real
+        // hardware: saved 16mm lens + 1080p30 → relaunch → lens correctly restored to
+        // 16mm, resolution silently back to 4K. Threading the saved config through
+        // [switchLens] as [initialVideoConfig], the same way [initialZoomRatio] already
+        // avoids this for zoom, fixes it — so the plain [selectVideoConfig] call only runs
+        // in the no-lens-switch branch below, where nothing else touches
+        // `selectedVideoConfig` afterward.
         val savedLens = allLenses.firstOrNull { it.cameraId == saved.lensCameraId }
         if (savedLens != null && savedLens.cameraId != caps.cameraId) {
-            switchLens(savedLens, initialZoomRatio = saved.zoomRatio ?: 1.0f)
+            switchLens(savedLens, initialZoomRatio = saved.zoomRatio ?: 1.0f, initialVideoConfig = savedConfig)
         } else {
             saved.zoomRatio?.let(::setZoom)
+            if (savedConfig != null) selectVideoConfig(savedConfig)
         }
     }
 
@@ -334,8 +348,24 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
      * passes the last-used zoom instead, threaded through here rather than applied via a
      * separate post-hoc [setZoom] call, since that would race this method's own async
      * `_uiState.update` (which otherwise unconditionally resets zoomRatio to 1.0).
+     * @param initialVideoConfig Recording resolution to select once the switch completes —
+     * `null` (a manual, user-initiated lens tap) keeps the existing behaviour of resetting
+     * to `supportedConfigs.firstOrNull()` (the default/largest). [restorePersistedSettings]
+     * passes the last-used config instead, threaded through here for exactly the same
+     * reason as [initialZoomRatio]: this method's own async `_uiState.update` otherwise
+     * unconditionally resets `selectedVideoConfig` to the default, silently clobbering a
+     * separately-applied restore — **実機で発見(2026-07-16)**: saved 16mm lens + 1080p30
+     * relaunched with the lens correctly restored but the resolution silently back to 4K,
+     * traced to exactly this race. Validated against the new lens's own [supportedConfigs]
+     * (via width/height/frameRate match, not object identity) rather than assumed valid,
+     * since [CameraCapabilityInspector.supportedVideoConfigs] is per-camera-id even though
+     * today's implementation happens to return the same device-global list regardless.
      */
-    fun switchLens(lens: CameraCapabilityInspector.AvailableLens, initialZoomRatio: Float = 1.0f) {
+    fun switchLens(
+        lens: CameraCapabilityInspector.AvailableLens,
+        initialZoomRatio: Float = 1.0f,
+        initialVideoConfig: CameraCapabilityInspector.VideoConfigCandidate? = null,
+    ) {
         if (_uiState.value.isRecording) return
         val surface = previewSurface ?: return
         val clampedZoom = initialZoomRatio.coerceIn(1.0f, lens.maxDigitalZoom)
@@ -348,7 +378,12 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                 val supportedConfigs = try {
                     capabilityInspector.supportedVideoConfigs(caps.cameraId)
                 } catch (e: Exception) { listOf(caps.videoConfig) }
-                val selectedConfig = supportedConfigs.firstOrNull() ?: caps.videoConfig
+                val restoredConfig = initialVideoConfig?.let { wanted ->
+                    supportedConfigs.firstOrNull {
+                        it.width == wanted.width && it.height == wanted.height && it.frameRate == wanted.frameRate
+                    }
+                }
+                val selectedConfig = restoredConfig ?: supportedConfigs.firstOrNull() ?: caps.videoConfig
 
                 _uiState.update { state ->
                     state.copy(
