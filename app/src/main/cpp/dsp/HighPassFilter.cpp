@@ -48,6 +48,12 @@ float HighPassFilter::processSample(float x, const BiquadCoeffs &c, FilterHistor
     return y;
 }
 
+namespace {
+bool isIdentity(const BiquadCoeffs &c) {
+    return c.b0 == 1.0f && c.b1 == 0.0f && c.b2 == 0.0f && c.a1 == 0.0f && c.a2 == 0.0f;
+}
+}  // namespace
+
 void HighPassFilter::process(float *interleaved, size_t frameCount) {
     BiquadCoeffs published;
     if (coeffExchange_.tryConsume(&published)) {
@@ -57,6 +63,14 @@ void HighPassFilter::process(float *interleaved, size_t frameCount) {
         rampTarget_ = published;
         rampSamplesRemaining_ = kRampSamples;
     }
+
+    // Cheap bypass for the steady-state disabled case (matches InputGain/MakeupGain's own
+    // early-return for their "off" case) — real-device finding: without this, every sample
+    // paid the full biquad cost even while off, unlike every other stage in this chain.
+    // Deliberately checked against currentCoeffs_/rampSamplesRemaining_ (audio-thread-owned
+    // state) rather than the UI-thread-owned enabled_ field — see that field's own
+    // "only ever touched from setEnabled()/setCutoffHz()" comment.
+    if (rampSamplesRemaining_ == 0 && isIdentity(currentCoeffs_)) return;
 
     for (size_t frame = 0; frame < frameCount; ++frame) {
         if (rampSamplesRemaining_ > 0) {
