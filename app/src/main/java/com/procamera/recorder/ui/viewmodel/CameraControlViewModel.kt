@@ -6,6 +6,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import android.os.StatFs
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import androidx.lifecycle.AndroidViewModel
@@ -589,46 +590,85 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setIso(iso: Int) {
         _uiState.update { it.copy(iso = iso) }
-        pipeline.updateCameraParams(_uiState.value.toCameraParams())
+        pushCameraParamsThrottled()
     }
 
     fun setExposureTime(nanos: Long) {
         _uiState.update { it.copy(exposureTimeNanos = nanos, shutterPreset = null) }
-        pipeline.updateCameraParams(_uiState.value.toCameraParams())
+        pushCameraParamsThrottled()
     }
 
     fun setShutterPreset(preset: CaptureRangeClamper.ShutterPreset) {
         _uiState.update { it.copy(shutterPreset = preset, exposureTimeNanos = preset.exposureTimeNanos()) }
-        pipeline.updateCameraParams(_uiState.value.toCameraParams())
+        pushCameraParamsThrottled()
     }
 
     fun setFocusDistance(diopters: Float) {
         _uiState.update { it.copy(focusDistanceDiopters = diopters, afAuto = false) }
-        pipeline.updateCameraParams(_uiState.value.toCameraParams())
+        pushCameraParamsThrottled()
     }
 
     fun setAfAuto(auto: Boolean) {
         val nextFocus = if (!auto && lastAutoFocus != null) lastAutoFocus!! else _uiState.value.focusDistanceDiopters
         _uiState.update { it.copy(afAuto = auto, focusDistanceDiopters = nextFocus) }
-        pipeline.updateCameraParams(_uiState.value.toCameraParams())
+        pushCameraParamsThrottled()
     }
 
     fun setWbAuto(auto: Boolean) {
         val nextKelvin = if (!auto && lastAutoKelvin != null) lastAutoKelvin!! else _uiState.value.kelvin
         val nextGains = if (!auto) lastAutoGains else null
         _uiState.update { it.copy(wbAuto = auto, kelvin = nextKelvin, manualWbGains = nextGains) }
-        pipeline.updateCameraParams(_uiState.value.toCameraParams())
+        pushCameraParamsThrottled()
     }
 
     fun setKelvin(kelvin: Double) {
         _uiState.update { it.copy(wbAuto = false, kelvin = kelvin, manualWbGains = null) }
-        pipeline.updateCameraParams(_uiState.value.toCameraParams())
+        pushCameraParamsThrottled()
     }
 
     fun setZoom(zoomRatio: Float) {
         val clamped = zoomRatio.coerceIn(1f, _uiState.value.maxZoomRatio.coerceAtLeast(1f))
         _uiState.update { it.copy(zoomRatio = clamped) }
-        pipeline.updateCameraParams(_uiState.value.toCameraParams())
+        pushCameraParamsThrottled()
+    }
+
+    private var lastCameraParamsPushMs = 0L
+    private var cameraParamsPushJob: Job? = null
+
+    /**
+     * **実機で発見**: [setIso]/[setZoom]/etc. above are wired directly to Compose `Slider`
+     * `onValueChange`, which fires on every pointer-move tick during a drag (tens of times
+     * per second) — each call used to synchronously reach
+     * [com.procamera.recorder.camera.CameraSessionController.updateCaptureParams]'s
+     * `CameraCaptureSession.setRepeatingRequest`, a cross-process Binder call into the
+     * camera HAL. Dragging a slider was flooding the HAL with repeating-request
+     * resubmissions on the main thread, correlating with a real-device-reported sharp FPS
+     * drop specifically while operating the settings panel (a *different* mechanism from
+     * this session's other frame-rate-collapse fix — that one was steady-state GC pressure;
+     * this one is a burst of Binder/HAL traffic during active dragging).
+     *
+     * Leading+trailing throttle: pushes immediately if nothing was pushed in the last
+     * [CAMERA_PARAMS_THROTTLE_MS], otherwise schedules exactly one trailing push using
+     * whatever [_uiState] holds *when the delayed job actually runs* (not the value at
+     * schedule time) — this guarantees the final settled value after a drag always lands,
+     * even though intermediate ticks during the drag get coalesced away. [_uiState] itself
+     * still updates on every tick for immediate, un-throttled slider visual feedback; only
+     * the HAL-facing push is rate-limited.
+     */
+    private fun pushCameraParamsThrottled() {
+        val now = SystemClock.elapsedRealtime()
+        val elapsed = now - lastCameraParamsPushMs
+        if (elapsed >= CAMERA_PARAMS_THROTTLE_MS && cameraParamsPushJob == null) {
+            lastCameraParamsPushMs = now
+            pipeline.updateCameraParams(_uiState.value.toCameraParams())
+        } else if (cameraParamsPushJob == null) {
+            cameraParamsPushJob = viewModelScope.launch {
+                delay((CAMERA_PARAMS_THROTTLE_MS - elapsed).coerceAtLeast(0L))
+                lastCameraParamsPushMs = SystemClock.elapsedRealtime()
+                pipeline.updateCameraParams(_uiState.value.toCameraParams())
+                cameraParamsPushJob = null
+            }
+        }
     }
 
     fun toggleControls() {
@@ -947,5 +987,8 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         const val CHANNEL_RIGHT = 1
         const val AUDIO_BITRATE_BPS = 256_000
         const val VIDEO_BITRATE_FALLBACK_BPS = 20_000_000
+        // ~30Hz cap on HAL-facing setRepeatingRequest churn from slider drags — see
+        // pushCameraParamsThrottled's doc.
+        const val CAMERA_PARAMS_THROTTLE_MS = 33L
     }
 }
