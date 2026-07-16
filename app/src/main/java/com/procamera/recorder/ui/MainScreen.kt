@@ -790,7 +790,14 @@ private fun ControlPanel(
         // below are LazyListScope extension functions (one item{} per section) rather than
         // a single Column-wrapped composable, specifically so this virtualization is real
         // and not just one giant item.
-        LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
+        // weight(1f): explicit, unambiguous claim on the remaining height in this Column
+        // (after the tab row/divider above) — standard practice for a scrollable region
+        // sharing a Column with fixed-size siblings, even though relying on the parent's
+        // own fillMaxHeight() bound would likely work here too.
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(vertical = 8.dp),
+        ) {
             when (state.activePanel) {
                 ControlPanel.Camera -> cameraControlsPanelItems(
                     state = state,
