@@ -866,6 +866,10 @@ class RecordingPipeline(private val context: Context) {
         nativeEngine.setInputGainDb(gainDb)
     }
 
+    fun setMakeupGainDb(gainDb: Float) {
+        nativeEngine.setMakeupGainDb(gainDb)
+    }
+
     /**
      * §4.5 "モニタリング再生". Rejects an enable request (leaving monitoring off and
      * reporting that via [onMonitoringEnabledChanged]) unless a headphone-type output is

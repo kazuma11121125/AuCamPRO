@@ -37,6 +37,7 @@ class UserPreferencesStore(context: Context) {
         val frameLineAspectRatio: FrameLineAspectRatio,
         val audioInputPreference: AudioDeviceRouter.InputKind,
         val inputGainDb: Float,
+        val makeupGainDb: Float,
         val monitoringEnabled: Boolean,
         val storageLocation: StorageLocation,
         val segmentDurationMinutes: Int?,
@@ -61,6 +62,7 @@ class UserPreferencesStore(context: Context) {
             ?.let { name -> AudioDeviceRouter.InputKind.entries.firstOrNull { it.name == name } }
             ?: AudioDeviceRouter.InputKind.Auto,
         inputGainDb = prefs.getFloat(KEY_INPUT_GAIN, 0f),
+        makeupGainDb = prefs.getFloat(KEY_MAKEUP_GAIN, 0f),
         monitoringEnabled = prefs.getBoolean(KEY_MONITORING, false),
         storageLocation = loadStorageLocation(),
         segmentDurationMinutes = prefs.getInt(KEY_SEGMENT_MINUTES, -1).takeIf { it > 0 },
@@ -112,6 +114,7 @@ class UserPreferencesStore(context: Context) {
             putString(KEY_FRAME_LINE, state.settings.frameLineAspectRatio.name)
             putString(KEY_AUDIO_INPUT_PREFERENCE, state.settings.audioInputPreference.name)
             putFloat(KEY_INPUT_GAIN, state.inputGainDb)
+            putFloat(KEY_MAKEUP_GAIN, state.makeupGainDb)
             putBoolean(KEY_MONITORING, state.monitoringEnabled)
             putInt(KEY_SEGMENT_MINUTES, state.settings.segmentDurationMinutes)
 
@@ -153,6 +156,7 @@ class UserPreferencesStore(context: Context) {
         const val KEY_FRAME_LINE = "frame_line_aspect_ratio"
         const val KEY_AUDIO_INPUT_PREFERENCE = "audio_input_preference"
         const val KEY_INPUT_GAIN = "input_gain_db"
+        const val KEY_MAKEUP_GAIN = "makeup_gain_db"
         const val KEY_MONITORING = "monitoring_enabled"
         const val KEY_SEGMENT_MINUTES = "segment_duration_minutes"
         const val KEY_VIDEO_W = "video_config_width"

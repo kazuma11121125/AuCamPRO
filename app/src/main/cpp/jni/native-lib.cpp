@@ -83,6 +83,11 @@ JNIEXPORT void JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nati
     toEngine(handle)->setInputGainDb(gainDb);
 }
 
+JNIEXPORT void JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nativeSetMakeupGainDb(
+    JNIEnv *, jobject, jlong handle, jfloat gainDb) {
+    toEngine(handle)->setMakeupGainDb(gainDb);
+}
+
 JNIEXPORT jfloat JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nativePeakDb(JNIEnv *, jobject,
                                                                                              jlong handle, jint channel) {
     return toEngine(handle)->peakDb(channel);

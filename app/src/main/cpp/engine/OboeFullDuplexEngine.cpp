@@ -295,6 +295,7 @@ oboe::DataCallbackResult OboeFullDuplexEngine::onAudioReady(oboe::AudioStream * 
 
     inputGain_.process(samples, sampleCount);
     eq_.process(samples, static_cast<size_t>(numFrames));
+    makeupGain_.process(samples, sampleCount);
     limiter_.process(samples, sampleCount);
     meter_.process(samples, static_cast<size_t>(numFrames), kChannelCount);
 

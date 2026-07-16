@@ -300,6 +300,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         setFrameLineAspectRatio(saved.frameLineAspectRatio)
         setAudioInputPreference(saved.audioInputPreference)
         setInputGainDb(saved.inputGainDb)
+        setMakeupGainDb(saved.makeupGainDb)
         setMonitoringEnabled(saved.monitoringEnabled)
         setStorageLocation(saved.storageLocation)
         saved.segmentDurationMinutes?.let(::setSegmentDuration)
@@ -716,6 +717,16 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         pipeline.setInputGainDb(gainDb)
     }
 
+    // Unlike the CAMERA-tab setters (setIso/setZoom/...), this doesn't need
+    // pushCameraParamsThrottled()'s throttle: pipeline.setMakeupGainDb() only reaches an
+    // std::atomic<float>.store() in the native engine (see MakeupGain.h), not a Binder call
+    // into the camera HAL, so per-tick cost during a slider drag is negligible — matches
+    // setInputGainDb's own (also unthrottled) treatment just above.
+    fun setMakeupGainDb(gainDb: Float) {
+        _uiState.update { it.copy(makeupGainDb = gainDb) }
+        pipeline.setMakeupGainDb(gainDb)
+    }
+
     // ──────────────────────────────────────────────────────────────────────────
     // Settings
     // ──────────────────────────────────────────────────────────────────────────
@@ -955,6 +966,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         val frameLineAspectRatio: FrameLineAspectRatio,
         val audioInputPreference: com.procamera.recorder.audio.AudioDeviceRouter.InputKind,
         val inputGainDb: Float,
+        val makeupGainDb: Float,
         val monitoringEnabled: Boolean,
         val storageLocation: StorageLocation,
         val segmentDurationMinutes: Int,
@@ -972,6 +984,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
             frameLineAspectRatio = state.settings.frameLineAspectRatio,
             audioInputPreference = state.settings.audioInputPreference,
             inputGainDb = state.inputGainDb,
+            makeupGainDb = state.makeupGainDb,
             monitoringEnabled = state.monitoringEnabled,
             storageLocation = state.settings.storageLocation,
             segmentDurationMinutes = state.settings.segmentDurationMinutes,

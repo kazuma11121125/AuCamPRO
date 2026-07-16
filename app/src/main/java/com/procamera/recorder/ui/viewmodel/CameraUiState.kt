@@ -263,6 +263,13 @@ data class CameraUiState(
     // gain (tuned for ordinary use) is far more likely to need pulling down than boosting.
     val inputGainDb: Float = 0f,
 
+    // ── Makeup gain (optional post-EQ loudness boost) ───────────────────────
+    // See dsp/MakeupGain.h's doc — opposite end of the gain-staging range from
+    // inputGainDb above (boosting a source too quiet for that control's own limited
+    // headroom). Defaults to 0dB/off: digital gain raises the noise floor by the same
+    // ratio as the signal, so this is opt-in per-recording, not something to leave on.
+    val makeupGainDb: Float = 0f,
+
     // ── EQ ───────────────────────────────────────────────────────────────────
     val eqBands: List<EqBandState> = EqBandState.defaults(),
 
@@ -345,6 +352,11 @@ data class CameraUiState(
     val inputGainDisplayText: String get() {
         val sign = if (inputGainDb > 0f) "+" else ""
         return "$sign${"%.1f".format(inputGainDb)}dB"
+    }
+
+    val makeupGainDisplayText: String get() {
+        val sign = if (makeupGainDb > 0f) "+" else ""
+        return "$sign${"%.1f".format(makeupGainDb)}dB"
     }
 
     val focusDisplayText: String get() {

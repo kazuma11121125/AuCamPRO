@@ -17,6 +17,7 @@ add_library(procamera_native SHARED
     dsp/SafetyLimiter.cpp
     dsp/PeakRmsMeter.cpp
     dsp/InputGain.cpp
+    dsp/MakeupGain.cpp
 )
 
 find_package(oboe REQUIRED CONFIG)

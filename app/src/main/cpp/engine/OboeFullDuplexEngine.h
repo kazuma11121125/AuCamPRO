@@ -11,6 +11,7 @@
 #include "common/Result.h"
 #include "dsp/BiquadEq.h"
 #include "dsp/InputGain.h"
+#include "dsp/MakeupGain.h"
 #include "dsp/PeakRmsMeter.h"
 #include "dsp/SafetyLimiter.h"
 
@@ -19,7 +20,7 @@ namespace procamera {
 // Owns the Oboe input stream (mic capture, always on while recording) and an optional
 // output stream (headphone monitor passthrough, §4.2). The input stream's audio callback
 // is the sole RT thread in this class: onAudioReady() runs the DSP chain (input gain ->
-// EQ -> safety limiter -> meter) and pushes the result into a lock-free ring buffer that
+// EQ -> makeup gain -> safety limiter -> meter) and pushes the result into a lock-free ring buffer that
 // the (non-RT) Audio Encoder thread drains from Kotlin. Every method other than onAudioReady() /
 // onErrorAfterClose() runs on a non-RT caller (UI/coroutine thread via JNI) and may take
 // locks / allocate freely; onAudioReady() itself touches nothing but already-owned
@@ -83,6 +84,12 @@ public:
     // See dsp/InputGain.h for what this can and cannot do.
     void setInputGainDb(float gainDb) { inputGain_.setGainDb(gainDb); }
 
+    // UI/coroutine thread only. Optional post-EQ loudness boost, default 0dB/bypass — see
+    // dsp/MakeupGain.h for how this differs from setInputGainDb above (opposite end of the
+    // gain-staging range: boosting a source too quiet for InputGain's own limited headroom
+    // to fully compensate, at the cost of also raising the noise floor).
+    void setMakeupGainDb(float gainDb) { makeupGain_.setGainDb(gainDb); }
+
     // Any thread (JNI pull accessors). channel: 0 = left, 1 = right.
     float peakDb(int channel) const { return meter_.peakDb(channel); }
     float rmsDb(int channel) const { return meter_.rmsDb(channel); }
@@ -131,6 +138,7 @@ private:
 
     InputGain inputGain_;
     ThreeBandEq eq_;
+    MakeupGain makeupGain_;
     SafetyLimiter limiter_;
     PeakRmsMeter meter_;
     SpscRingBuffer<float> ringBuffer_;  // interleaved stereo float samples

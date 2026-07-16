@@ -770,6 +770,7 @@ private fun ControlPanel(
                     state = state,
                     viewModel = viewModel,
                     onInputGainChange = viewModel::setInputGainDb,
+                    onMakeupGainChange = viewModel::setMakeupGainDb,
                     onEqGainChange = viewModel::setEqBandGain,
                     onEqFreqChange = viewModel::setEqBandFreq,
                     onEqQChange = viewModel::setEqBandQ,
@@ -1063,11 +1064,18 @@ private fun ShutterPresetRow(
 private const val INPUT_GAIN_MIN_DB = -24f
 private const val INPUT_GAIN_MAX_DB = 12f
 
+// Boost-only, unlike GAIN above: see CameraUiState.makeupGainDb's doc — this is for
+// pushing a too-quiet source louder than INPUT_GAIN_MAX_DB alone can reach, not for
+// gain-staging the input. 0dB (bottom of the range) is the default/off position.
+private const val MAKEUP_GAIN_MIN_DB = 0f
+private const val MAKEUP_GAIN_MAX_DB = 18f
+
 @Composable
 private fun AudioControlsPanel(
     state: CameraUiState,
     viewModel: CameraControlViewModel,
     onInputGainChange: (Float) -> Unit,
+    onMakeupGainChange: (Float) -> Unit,
     onEqGainChange: (Int, Float) -> Unit,
     onEqFreqChange: (Int, Float) -> Unit,
     onEqQChange: (Int, Float) -> Unit,
@@ -1149,6 +1157,45 @@ private fun AudioControlsPanel(
                 onQChange = { q -> onEqQChange(index, q) },
             )
         }
+
+        HorizontalDivider(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
+        )
+
+        // Makeup gain — after EQ, before the limiter in the actual DSP chain (see
+        // dsp/MakeupGain.h), so it's placed here in the UI too, after the EQ bands above.
+        // Boost-only and defaults to 0 (off): raising this also raises the noise floor by
+        // the same ratio, so the caption below states that trade-off up front rather than
+        // leaving it to be discovered by ear.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = "MAKEUP GAIN",
+                color = OnSurfaceSecondary,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 1.sp,
+            )
+            Text(
+                text = "オフ推奨: ノイズも一緒に持ち上がります",
+                color = OnSurfaceSecondary,
+                fontSize = 9.sp,
+            )
+        }
+        ManualControlSlider(
+            label = "BOOST",
+            value = ((state.makeupGainDb - MAKEUP_GAIN_MIN_DB) / (MAKEUP_GAIN_MAX_DB - MAKEUP_GAIN_MIN_DB))
+                .coerceIn(0f, 1f),
+            valueText = state.makeupGainDisplayText,
+            onValueChange = { norm ->
+                onMakeupGainChange(MAKEUP_GAIN_MIN_DB + norm * (MAKEUP_GAIN_MAX_DB - MAKEUP_GAIN_MIN_DB))
+            },
+        )
 
         HorizontalDivider(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),

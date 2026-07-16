@@ -46,6 +46,12 @@ class NativeEngineBridge : AutoCloseable {
      */
     fun setInputGainDb(gainDb: Float) = nativeSetInputGainDb(handle, gainDb)
 
+    /**
+     * Optional post-EQ loudness boost, default 0dB/bypass — see `dsp/MakeupGain.h`'s doc
+     * for how this differs from [setInputGainDb] (opposite end of the gain-staging range).
+     */
+    fun setMakeupGainDb(gainDb: Float) = nativeSetMakeupGainDb(handle, gainDb)
+
     /** [channel]: 0 = left, 1 = right — see `dsp/PeakRmsMeter.h`'s doc for why L/R are tracked independently. */
     fun peakDb(channel: Int): Float = if (closed) SILENCE_DB else nativePeakDb(handle, channel)
 
@@ -103,6 +109,7 @@ class NativeEngineBridge : AutoCloseable {
     private external fun nativeSetMonitoringEnabled(handle: Long, enabled: Boolean, outputDeviceId: Int): String?
     private external fun nativeSetEqBandParams(handle: Long, band: Int, freqHz: Float, q: Float, gainDb: Float)
     private external fun nativeSetInputGainDb(handle: Long, gainDb: Float)
+    private external fun nativeSetMakeupGainDb(handle: Long, gainDb: Float)
     private external fun nativePeakDb(handle: Long, channel: Int): Float
     private external fun nativeRmsDb(handle: Long, channel: Int): Float
     private external fun nativeRingBufferOverrunCount(handle: Long): Int
