@@ -31,7 +31,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.verticalScroll
@@ -757,16 +760,26 @@ private fun ControlPanel(
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
 
-        Column(
-            modifier = Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState()),
-        ) {
+        // LazyColumn (not Column + verticalScroll): 実機で発見 — a plain
+        // Column+verticalScroll composes and lays out its *entire* content on every scroll
+        // frame regardless of what's actually visible (no virtualization). AudioControlsPanel
+        // alone is GAIN + HIGH-PASS FILTER + 3-band EQ + MAKEUP GAIN + MONITOR — a real
+        // stack of Sliders/Switches — and dumpsys gfxinfo confirmed this: scrolling the
+        // AUDIO tab measured 94% janky frames (50th %ile 150ms, 90th %ile 600ms; GPU time
+        // was healthy throughout, so the cost was squarely main-thread layout/composition,
+        // not drawing). LazyColumn only composes/measures the items actually on/near
+        // screen, which is the standard fix for exactly this shape of problem. Both panels
+        // below are LazyListScope extension functions (one item{} per section) rather than
+        // a single Column-wrapped composable, specifically so this virtualization is real
+        // and not just one giant item.
+        LazyColumn(contentPadding = PaddingValues(vertical = 8.dp)) {
             when (state.activePanel) {
-                ControlPanel.Camera -> CameraControlsPanel(
+                ControlPanel.Camera -> cameraControlsPanelItems(
                     state = state,
                     viewModel = viewModel,
                 )
 
-                ControlPanel.Audio -> AudioControlsPanel(
+                ControlPanel.Audio -> audioControlsPanelItems(
                     state = state,
                     viewModel = viewModel,
                     onInputGainChange = viewModel::setInputGainDb,
@@ -785,8 +798,9 @@ private fun ControlPanel(
 
 // ── Camera controls tab ───────────────────────────────────────────────────────
 
-@Composable
-private fun CameraControlsPanel(
+// LazyListScope extension (not a plain @Composable) so each section below becomes its own
+// item{} — see the LazyColumn call site's doc for why this matters (virtualized scrolling).
+private fun LazyListScope.cameraControlsPanelItems(
     state: CameraUiState,
     viewModel: CameraControlViewModel,
 ) {
@@ -800,13 +814,9 @@ private fun CameraControlsPanel(
         viewModel.switchLens(lens)
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 8.dp),
-    ) {
-        // Lens selector
-        if (state.availableLenses.isNotEmpty()) {
+    // Lens selector
+    if (state.availableLenses.isNotEmpty()) {
+        item {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -842,9 +852,11 @@ private fun CameraControlsPanel(
                 }
             }
         }
-        
-        // Zoom
-        if (state.maxZoomRatio > 1.0f) {
+    }
+
+    // Zoom
+    if (state.maxZoomRatio > 1.0f) {
+        item {
             val zoomNorm = ((state.zoomRatio - 1f) / (state.maxZoomRatio - 1f)).coerceIn(0f, 1f)
             ManualControlSlider(
                 label = "ZOOM",
@@ -856,10 +868,12 @@ private fun CameraControlsPanel(
                 },
             )
         }
+    }
 
-        // FPS — display-only (not adjustable here; it's derived from the selected
-        // recording resolution in Settings), placed alongside ISO/SHUTTER per real-device
-        // feedback that it should be visible without checking the top-status readout.
+    // FPS — display-only (not adjustable here; it's derived from the selected
+    // recording resolution in Settings), placed alongside ISO/SHUTTER per real-device
+    // feedback that it should be visible without checking the top-status readout.
+    item {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -869,8 +883,10 @@ private fun CameraControlsPanel(
             Text(text = "FPS", color = OnSurfacePrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             Text(text = "${state.fps}fps", color = OnSurfaceSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
         }
+    }
 
-        // ISO
+    // ISO
+    item {
         if (caps != null) {
             IsoSlider(
                 iso = state.iso,
@@ -886,8 +902,10 @@ private fun CameraControlsPanel(
                 enabled = false,
             )
         }
+    }
 
-        // Shutter
+    // Shutter
+    item {
         if (caps != null) {
             ShutterSlider(
                 exposureTimeNanos = state.exposureTimeNanos,
@@ -903,16 +921,20 @@ private fun CameraControlsPanel(
                 enabled = false,
             )
         }
+    }
 
-        // Shutter presets (LED-PWM avoidance — §4.1)
+    // Shutter presets (LED-PWM avoidance — §4.1)
+    item {
         ShutterPresetRow(
             currentExposureNanos = state.exposureTimeNanos,
             onPresetSelect = { preset -> viewModel.setExposureTime(preset.exposureTimeNanos()) },
         )
+    }
 
-        // Focus — AF/MF mode switch (§AF/MFモード). Long-press on the preview also drops
-        // into MF at the tapped point (PreviewSurfaceView's onLongPressToFocus), so this
-        // switch's state can change without the user touching it directly here.
+    // Focus — AF/MF mode switch (§AF/MFモード). Long-press on the preview also drops
+    // into MF at the tapped point (PreviewSurfaceView's onLongPressToFocus), so this
+    // switch's state can change without the user touching it directly here.
+    item {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 0.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -930,13 +952,17 @@ private fun CameraControlsPanel(
                 colors = SwitchDefaults.colors(checkedThumbColor = Amber, checkedTrackColor = Amber.copy(alpha = 0.3f))
             )
         }
+    }
+    item {
         FocusSlider(
             focusDiopters = state.focusDistanceDiopters,
             minFocusDistance = caps?.minFocusDistanceDiopters ?: 10f,
             onFocusChange = viewModel::setFocusDistance,
         )
+    }
 
-        // White balance
+    // White balance
+    item {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 0.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -949,12 +975,16 @@ private fun CameraControlsPanel(
                 colors = SwitchDefaults.colors(checkedThumbColor = Amber, checkedTrackColor = Amber.copy(alpha = 0.3f))
             )
         }
+    }
+    item {
         WhiteBalanceSlider(
             kelvin = state.kelvin,
             enabled = caps?.supportsManualWb ?: false,
             onKelvinChange = viewModel::setKelvin,
         )
-        
+    }
+
+    item {
         if (caps?.supportsManualWb == false) {
             Text(
                 text = "Manual WB: この機種ではサポートされていません",
@@ -1077,8 +1107,10 @@ private const val MAKEUP_GAIN_MAX_DB = 18f
 private const val HIGH_PASS_CUTOFF_MIN_HZ = 40f
 private const val HIGH_PASS_CUTOFF_MAX_HZ = 240f
 
-@Composable
-private fun AudioControlsPanel(
+// LazyListScope extension (not a plain @Composable) — see the LazyColumn call site's doc
+// for why (virtualized scrolling; this panel specifically was measured at 94% janky frames
+// before this conversion).
+private fun LazyListScope.audioControlsPanelItems(
     state: CameraUiState,
     viewModel: CameraControlViewModel,
     onInputGainChange: (Float) -> Unit,
@@ -1090,14 +1122,10 @@ private fun AudioControlsPanel(
     onEqQChange: (Int, Float) -> Unit,
     onMonitorToggle: (Boolean) -> Unit,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 8.dp),
-    ) {
-        // USB Audio > 有線 > 内蔵 優先ルーティング(§4.2)の実際の着地先 — see
-        // AudioDeviceRouter's doc for why this shows what was actually opened, not just
-        // what was requested.
+    // USB Audio > 有線 > 内蔵 優先ルーティング(§4.2)の実際の着地先 — see
+    // AudioDeviceRouter's doc for why this shows what was actually opened, not just
+    // what was requested.
+    item {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1119,19 +1147,23 @@ private fun AudioControlsPanel(
                 fontWeight = FontWeight.Medium,
             )
         }
+    }
 
-        // xRun / overrun stats — collects viewModel.meterState itself (see AudioStatsRow's
-        // doc) so this ~30Hz churn only recomposes this one row, not the EQ sliders below.
-        AudioStatsRow(viewModel = viewModel)
+    // xRun / overrun stats — collects viewModel.meterState itself (see AudioStatsRow's
+    // doc) so this ~30Hz churn only recomposes this one row, not the EQ sliders below.
+    item { AudioStatsRow(viewModel = viewModel) }
 
+    item {
         HorizontalDivider(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
         )
+    }
 
-        // Input gain (record level) — first in the chain, so it comes first in the UI too
-        // (audio.pdf調査: set the level before shaping it). Asymmetric range biased toward
-        // attenuation — see CameraUiState.inputGainDb's doc for why.
+    // Input gain (record level) — first in the chain, so it comes first in the UI too
+    // (audio.pdf調査: set the level before shaping it). Asymmetric range biased toward
+    // attenuation — see CameraUiState.inputGainDb's doc for why.
+    item {
         ManualControlSlider(
             label = "GAIN",
             value = ((state.inputGainDb - INPUT_GAIN_MIN_DB) / (INPUT_GAIN_MAX_DB - INPUT_GAIN_MIN_DB))
@@ -1141,17 +1173,21 @@ private fun AudioControlsPanel(
                 onInputGainChange(INPUT_GAIN_MIN_DB + norm * (INPUT_GAIN_MAX_DB - INPUT_GAIN_MIN_DB))
             },
         )
+    }
 
+    item {
         HorizontalDivider(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
         )
+    }
 
-        // High-pass filter (風切り音/ハンドリングノイズ対策のローカット) — before the EQ
-        // both in the DSP chain and here in the UI (see dsp/HighPassFilter.h's doc for why
-        // this order matters: a boosted EQ Low band must never re-amplify what this is
-        // meant to remove). Off by default; the cutoff slider only has an audible effect
-        // while the switch is on, so it's dimmed to match.
+    // High-pass filter (風切り音/ハンドリングノイズ対策のローカット) — before the EQ
+    // both in the DSP chain and here in the UI (see dsp/HighPassFilter.h's doc for why
+    // this order matters: a boosted EQ Low band must never re-amplify what this is
+    // meant to remove). Off by default; the cutoff slider only has an audible effect
+    // while the switch is on, so it's dimmed to match.
+    item {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1175,6 +1211,8 @@ private fun AudioControlsPanel(
                 ),
             )
         }
+    }
+    item {
         ManualControlSlider(
             label = "CUTOFF",
             value = ((state.highPassCutoffHz - HIGH_PASS_CUTOFF_MIN_HZ) / (HIGH_PASS_CUTOFF_MAX_HZ - HIGH_PASS_CUTOFF_MIN_HZ))
@@ -1185,13 +1223,17 @@ private fun AudioControlsPanel(
                 onHighPassCutoffChange(HIGH_PASS_CUTOFF_MIN_HZ + norm * (HIGH_PASS_CUTOFF_MAX_HZ - HIGH_PASS_CUTOFF_MIN_HZ))
             },
         )
+    }
 
+    item {
         HorizontalDivider(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
         )
+    }
 
-        // EQ bands
+    // EQ bands
+    item {
         Text(
             text = "3-BAND EQ",
             color = OnSurfaceSecondary,
@@ -1200,8 +1242,10 @@ private fun AudioControlsPanel(
             letterSpacing = 1.sp,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
         )
+    }
 
-        state.eqBands.forEachIndexed { index, band ->
+    state.eqBands.forEachIndexed { index, band ->
+        item {
             EqBandRow(
                 band = band,
                 bandIndex = index,
@@ -1210,17 +1254,21 @@ private fun AudioControlsPanel(
                 onQChange = { q -> onEqQChange(index, q) },
             )
         }
+    }
 
+    item {
         HorizontalDivider(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
         )
+    }
 
-        // Makeup gain — after EQ, before the limiter in the actual DSP chain (see
-        // dsp/MakeupGain.h), so it's placed here in the UI too, after the EQ bands above.
-        // Boost-only and defaults to 0 (off): raising this also raises the noise floor by
-        // the same ratio, so the caption below states that trade-off up front rather than
-        // leaving it to be discovered by ear.
+    // Makeup gain — after EQ, before the limiter in the actual DSP chain (see
+    // dsp/MakeupGain.h), so it's placed here in the UI too, after the EQ bands above.
+    // Boost-only and defaults to 0 (off): raising this also raises the noise floor by
+    // the same ratio, so the caption below states that trade-off up front rather than
+    // leaving it to be discovered by ear.
+    item {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1240,6 +1288,8 @@ private fun AudioControlsPanel(
                 fontSize = 9.sp,
             )
         }
+    }
+    item {
         ManualControlSlider(
             label = "BOOST",
             value = ((state.makeupGainDb - MAKEUP_GAIN_MIN_DB) / (MAKEUP_GAIN_MAX_DB - MAKEUP_GAIN_MIN_DB))
@@ -1249,13 +1299,17 @@ private fun AudioControlsPanel(
                 onMakeupGainChange(MAKEUP_GAIN_MIN_DB + norm * (MAKEUP_GAIN_MAX_DB - MAKEUP_GAIN_MIN_DB))
             },
         )
+    }
 
+    item {
         HorizontalDivider(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
         )
+    }
 
-        // Monitor toggle
+    // Monitor toggle
+    item {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
