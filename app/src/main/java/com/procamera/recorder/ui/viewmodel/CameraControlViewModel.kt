@@ -398,6 +398,12 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                         errorMessage = null,
                     )
                 }
+                // Same gap as [selectVideoConfig] — the `params` passed to startPreview()
+                // above was built from the *pre-switch* uiState (old lens's fps), and the
+                // new session was opened with that stale value. selectedConfig here may be
+                // a different fps (new lens's default/restored config), so push the
+                // now-current params (fps included) into the just-opened session.
+                pipeline.updateCameraParams(_uiState.value.toCameraParams())
             } else {
                 _uiState.update {
                     it.copy(recordingState = RecordingUiState.Previewing, errorMessage = "レンズ切り替えに失敗しました")
@@ -414,6 +420,17 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         if (_uiState.value.isRecording) return
         pipeline.selectVideoConfig(config)
         _uiState.update { it.copy(selectedVideoConfig = config, fps = config.frameRate) }
+        // **実機で発見**: every other setter in this file (setIso/setExposureTime/setAfAuto/
+        // setWbAuto/setZoom/...) pushes its change into the *live* capture request via
+        // updateCameraParams() right after updating uiState — this one didn't, so
+        // toCameraParams()'s fps (`selectedVideoConfig?.frameRate ?: fps`) changed in the UI
+        // but SENSOR_FRAME_DURATION on the actual CaptureRequest stayed at whatever fps was
+        // last explicitly pushed. Picking e.g. 60fps right after launch (or a lens switch)
+        // and hitting REC without touching any other slider meant the camera kept capturing
+        // at the stale (e.g. 30fps) frame duration while VideoEncoder was configured for 60
+        // — a consistent halved frame rate, not just a cosmetic UI mismatch. No-op if no
+        // session is active yet (updateCaptureParams()'s own doc).
+        pipeline.updateCameraParams(_uiState.value.toCameraParams())
     }
 
     // ──────────────────────────────────────────────────────────────────────────
