@@ -52,6 +52,10 @@ class NativeEngineBridge : AutoCloseable {
      */
     fun setMakeupGainDb(gainDb: Float) = nativeSetMakeupGainDb(handle, gainDb)
 
+    /** §4.2 風切り音/ハンドリングノイズ対策のローカット — see `dsp/HighPassFilter.h`'s doc. */
+    fun setHighPassEnabled(enabled: Boolean) = nativeSetHighPassEnabled(handle, enabled)
+    fun setHighPassCutoffHz(cutoffHz: Float) = nativeSetHighPassCutoffHz(handle, cutoffHz)
+
     /** [channel]: 0 = left, 1 = right — see `dsp/PeakRmsMeter.h`'s doc for why L/R are tracked independently. */
     fun peakDb(channel: Int): Float = if (closed) SILENCE_DB else nativePeakDb(handle, channel)
 
@@ -110,6 +114,8 @@ class NativeEngineBridge : AutoCloseable {
     private external fun nativeSetEqBandParams(handle: Long, band: Int, freqHz: Float, q: Float, gainDb: Float)
     private external fun nativeSetInputGainDb(handle: Long, gainDb: Float)
     private external fun nativeSetMakeupGainDb(handle: Long, gainDb: Float)
+    private external fun nativeSetHighPassEnabled(handle: Long, enabled: Boolean)
+    private external fun nativeSetHighPassCutoffHz(handle: Long, cutoffHz: Float)
     private external fun nativePeakDb(handle: Long, channel: Int): Float
     private external fun nativeRmsDb(handle: Long, channel: Int): Float
     private external fun nativeRingBufferOverrunCount(handle: Long): Int

@@ -18,6 +18,7 @@ add_library(procamera_native SHARED
     dsp/PeakRmsMeter.cpp
     dsp/InputGain.cpp
     dsp/MakeupGain.cpp
+    dsp/HighPassFilter.cpp
 )
 
 find_package(oboe REQUIRED CONFIG)

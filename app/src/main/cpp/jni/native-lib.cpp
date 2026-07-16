@@ -88,6 +88,16 @@ JNIEXPORT void JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nati
     toEngine(handle)->setMakeupGainDb(gainDb);
 }
 
+JNIEXPORT void JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nativeSetHighPassEnabled(
+    JNIEnv *, jobject, jlong handle, jboolean enabled) {
+    toEngine(handle)->setHighPassEnabled(enabled == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nativeSetHighPassCutoffHz(
+    JNIEnv *, jobject, jlong handle, jfloat cutoffHz) {
+    toEngine(handle)->setHighPassCutoffHz(cutoffHz);
+}
+
 JNIEXPORT jfloat JNICALL Java_com_procamera_recorder_audio_NativeEngineBridge_nativePeakDb(JNIEnv *, jobject,
                                                                                              jlong handle, jint channel) {
     return toEngine(handle)->peakDb(channel);

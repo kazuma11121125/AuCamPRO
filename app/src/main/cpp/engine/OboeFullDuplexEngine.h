@@ -10,6 +10,7 @@
 #include "buffer/SpscRingBuffer.h"
 #include "common/Result.h"
 #include "dsp/BiquadEq.h"
+#include "dsp/HighPassFilter.h"
 #include "dsp/InputGain.h"
 #include "dsp/MakeupGain.h"
 #include "dsp/PeakRmsMeter.h"
@@ -20,7 +21,7 @@ namespace procamera {
 // Owns the Oboe input stream (mic capture, always on while recording) and an optional
 // output stream (headphone monitor passthrough, §4.2). The input stream's audio callback
 // is the sole RT thread in this class: onAudioReady() runs the DSP chain (input gain ->
-// EQ -> makeup gain -> safety limiter -> meter) and pushes the result into a lock-free ring buffer that
+// high-pass filter -> EQ -> makeup gain -> safety limiter -> meter) and pushes the result into a lock-free ring buffer that
 // the (non-RT) Audio Encoder thread drains from Kotlin. Every method other than onAudioReady() /
 // onErrorAfterClose() runs on a non-RT caller (UI/coroutine thread via JNI) and may take
 // locks / allocate freely; onAudioReady() itself touches nothing but already-owned
@@ -77,6 +78,12 @@ public:
 
     // UI/coroutine thread only.
     void setEqBandParams(int band, float freqHz, float q, float gainDb);
+
+    // UI/coroutine thread only. §4.2 風切り音/ハンドリングノイズ対策のローカット —
+    // see dsp/HighPassFilter.h for why this is first in the chain (before the EQ) and how
+    // enable/disable avoids a click.
+    void setHighPassEnabled(bool enabled) { highPassFilter_.setEnabled(enabled); }
+    void setHighPassCutoffHz(float cutoffHz) { highPassFilter_.setCutoffHz(cutoffHz); }
 
     // UI/coroutine thread only. Manual record-level control (audio.pdf調査の§Layer1相当
     // — InputPreset::Unprocessedで無効化したOSのAGCの代わりに、110-125dB SPLのような
@@ -137,6 +144,7 @@ private:
     Result<std::shared_ptr<oboe::AudioStream>, std::string> openInputStreamLocked(int32_t deviceId);
 
     InputGain inputGain_;
+    HighPassFilter highPassFilter_;
     ThreeBandEq eq_;
     MakeupGain makeupGain_;
     SafetyLimiter limiter_;

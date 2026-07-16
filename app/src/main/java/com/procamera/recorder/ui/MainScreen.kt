@@ -771,6 +771,8 @@ private fun ControlPanel(
                     viewModel = viewModel,
                     onInputGainChange = viewModel::setInputGainDb,
                     onMakeupGainChange = viewModel::setMakeupGainDb,
+                    onHighPassEnabledChange = viewModel::setHighPassEnabled,
+                    onHighPassCutoffChange = viewModel::setHighPassCutoffHz,
                     onEqGainChange = viewModel::setEqBandGain,
                     onEqFreqChange = viewModel::setEqBandFreq,
                     onEqQChange = viewModel::setEqBandQ,
@@ -1070,12 +1072,19 @@ private const val INPUT_GAIN_MAX_DB = 12f
 private const val MAKEUP_GAIN_MIN_DB = 0f
 private const val MAKEUP_GAIN_MAX_DB = 18f
 
+// Covers the standard wind/rumble-cut range field recorders expose (roughly 40-240Hz);
+// see CameraUiState.highPassCutoffHz's doc.
+private const val HIGH_PASS_CUTOFF_MIN_HZ = 40f
+private const val HIGH_PASS_CUTOFF_MAX_HZ = 240f
+
 @Composable
 private fun AudioControlsPanel(
     state: CameraUiState,
     viewModel: CameraControlViewModel,
     onInputGainChange: (Float) -> Unit,
     onMakeupGainChange: (Float) -> Unit,
+    onHighPassEnabledChange: (Boolean) -> Unit,
+    onHighPassCutoffChange: (Float) -> Unit,
     onEqGainChange: (Int, Float) -> Unit,
     onEqFreqChange: (Int, Float) -> Unit,
     onEqQChange: (Int, Float) -> Unit,
@@ -1130,6 +1139,50 @@ private fun AudioControlsPanel(
             valueText = state.inputGainDisplayText,
             onValueChange = { norm ->
                 onInputGainChange(INPUT_GAIN_MIN_DB + norm * (INPUT_GAIN_MAX_DB - INPUT_GAIN_MIN_DB))
+            },
+        )
+
+        HorizontalDivider(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
+        )
+
+        // High-pass filter (風切り音/ハンドリングノイズ対策のローカット) — before the EQ
+        // both in the DSP chain and here in the UI (see dsp/HighPassFilter.h's doc for why
+        // this order matters: a boosted EQ Low band must never re-amplify what this is
+        // meant to remove). Off by default; the cutoff slider only has an audible effect
+        // while the switch is on, so it's dimmed to match.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "HIGH-PASS FILTER",
+                color = OnSurfaceSecondary,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 1.sp,
+            )
+            Switch(
+                checked = state.highPassEnabled,
+                onCheckedChange = onHighPassEnabledChange,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Amber,
+                    checkedTrackColor = Amber.copy(alpha = 0.3f),
+                ),
+            )
+        }
+        ManualControlSlider(
+            label = "CUTOFF",
+            value = ((state.highPassCutoffHz - HIGH_PASS_CUTOFF_MIN_HZ) / (HIGH_PASS_CUTOFF_MAX_HZ - HIGH_PASS_CUTOFF_MIN_HZ))
+                .coerceIn(0f, 1f),
+            valueText = state.highPassCutoffDisplayText,
+            enabled = state.highPassEnabled,
+            onValueChange = { norm ->
+                onHighPassCutoffChange(HIGH_PASS_CUTOFF_MIN_HZ + norm * (HIGH_PASS_CUTOFF_MAX_HZ - HIGH_PASS_CUTOFF_MIN_HZ))
             },
         )
 

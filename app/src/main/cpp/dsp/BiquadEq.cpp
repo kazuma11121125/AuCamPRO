@@ -28,6 +28,31 @@ BiquadCoeffs computeRbjPeakingCoeffs(double sampleRateHz, double centerFreqHz, d
     return out;
 }
 
+BiquadCoeffs computeRbjHighpassCoeffs(double sampleRateHz, double cutoffFreqHz, double q) {
+    // RBJ Audio Cookbook "High Pass Filter" formula.
+    const double w0 = 2.0 * M_PI * cutoffFreqHz / sampleRateHz;
+    const double cosW0 = std::cos(w0);
+    const double sinW0 = std::sin(w0);
+    const double alpha = sinW0 / (2.0 * q);
+
+    const double b0 = (1.0 + cosW0) / 2.0;
+    const double b1 = -(1.0 + cosW0);
+    const double b2 = (1.0 + cosW0) / 2.0;
+    const double a0 = 1.0 + alpha;
+    const double a1 = -2.0 * cosW0;
+    const double a2 = 1.0 - alpha;
+
+    BiquadCoeffs out;
+    out.b0 = static_cast<float>(b0 / a0);
+    out.b1 = static_cast<float>(b1 / a0);
+    out.b2 = static_cast<float>(b2 / a0);
+    out.a1 = static_cast<float>(a1 / a0);
+    out.a2 = static_cast<float>(a2 / a0);
+    return out;
+}
+
+BiquadCoeffs identityBiquadCoeffs() { return BiquadCoeffs{}; }  // b0=1, everything else 0 (see struct default)
+
 ThreeBandEq::ThreeBandEq(double sampleRateHz, int channelCount)
     : sampleRateHz_(sampleRateHz), channelCount_(channelCount), historyPerChannel_(channelCount) {
     // Spec §4.2 defaults: Low 80Hz Q=0.8 -6dB / Mid 1500Hz Q=1.2 +3dB / High 8000Hz Q=0.7 -4dB.

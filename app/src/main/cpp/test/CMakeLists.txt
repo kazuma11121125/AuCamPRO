@@ -46,6 +46,7 @@ add_library(procamera_portable STATIC
     ${PROCAMERA_CPP_ROOT}/dsp/PeakRmsMeter.cpp
     ${PROCAMERA_CPP_ROOT}/dsp/InputGain.cpp
     ${PROCAMERA_CPP_ROOT}/dsp/MakeupGain.cpp
+    ${PROCAMERA_CPP_ROOT}/dsp/HighPassFilter.cpp
 )
 target_include_directories(procamera_portable PUBLIC ${PROCAMERA_CPP_ROOT})
 target_compile_options(procamera_portable PUBLIC -Wall -Wextra)

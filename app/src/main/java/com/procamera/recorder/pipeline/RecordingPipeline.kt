@@ -870,6 +870,14 @@ class RecordingPipeline(private val context: Context) {
         nativeEngine.setMakeupGainDb(gainDb)
     }
 
+    fun setHighPassEnabled(enabled: Boolean) {
+        nativeEngine.setHighPassEnabled(enabled)
+    }
+
+    fun setHighPassCutoffHz(cutoffHz: Float) {
+        nativeEngine.setHighPassCutoffHz(cutoffHz)
+    }
+
     /**
      * §4.5 "モニタリング再生". Rejects an enable request (leaving monitoring off and
      * reporting that via [onMonitoringEnabledChanged]) unless a headphone-type output is

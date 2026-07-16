@@ -8,7 +8,8 @@
 namespace procamera {
 
 OboeFullDuplexEngine::OboeFullDuplexEngine()
-    : eq_(kSampleRate, kChannelCount),
+    : highPassFilter_(kSampleRate, kChannelCount),
+      eq_(kSampleRate, kChannelCount),
       limiter_(-1.0f),
       meter_(kSampleRate),
       ringBuffer_(kRingBufferCapacityFrames * kChannelCount) {}
@@ -294,6 +295,7 @@ oboe::DataCallbackResult OboeFullDuplexEngine::onAudioReady(oboe::AudioStream * 
     const size_t sampleCount = static_cast<size_t>(numFrames) * kChannelCount;
 
     inputGain_.process(samples, sampleCount);
+    highPassFilter_.process(samples, static_cast<size_t>(numFrames));
     eq_.process(samples, static_cast<size_t>(numFrames));
     makeupGain_.process(samples, sampleCount);
     limiter_.process(samples, sampleCount);

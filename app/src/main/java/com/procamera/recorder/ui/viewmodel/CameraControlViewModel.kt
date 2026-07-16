@@ -301,6 +301,8 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         setAudioInputPreference(saved.audioInputPreference)
         setInputGainDb(saved.inputGainDb)
         setMakeupGainDb(saved.makeupGainDb)
+        setHighPassEnabled(saved.highPassEnabled)
+        setHighPassCutoffHz(saved.highPassCutoffHz)
         setMonitoringEnabled(saved.monitoringEnabled)
         setStorageLocation(saved.storageLocation)
         saved.segmentDurationMinutes?.let(::setSegmentDuration)
@@ -727,6 +729,18 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         pipeline.setMakeupGainDb(gainDb)
     }
 
+    // Same reasoning as setMakeupGainDb: reaches only a native engine call (no Camera2/
+    // Binder involvement), so neither of these needs pushCameraParamsThrottled()'s throttle.
+    fun setHighPassEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(highPassEnabled = enabled) }
+        pipeline.setHighPassEnabled(enabled)
+    }
+
+    fun setHighPassCutoffHz(cutoffHz: Float) {
+        _uiState.update { it.copy(highPassCutoffHz = cutoffHz) }
+        pipeline.setHighPassCutoffHz(cutoffHz)
+    }
+
     // ──────────────────────────────────────────────────────────────────────────
     // Settings
     // ──────────────────────────────────────────────────────────────────────────
@@ -967,6 +981,8 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         val audioInputPreference: com.procamera.recorder.audio.AudioDeviceRouter.InputKind,
         val inputGainDb: Float,
         val makeupGainDb: Float,
+        val highPassEnabled: Boolean,
+        val highPassCutoffHz: Float,
         val monitoringEnabled: Boolean,
         val storageLocation: StorageLocation,
         val segmentDurationMinutes: Int,
@@ -985,6 +1001,8 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
             audioInputPreference = state.settings.audioInputPreference,
             inputGainDb = state.inputGainDb,
             makeupGainDb = state.makeupGainDb,
+            highPassEnabled = state.highPassEnabled,
+            highPassCutoffHz = state.highPassCutoffHz,
             monitoringEnabled = state.monitoringEnabled,
             storageLocation = state.settings.storageLocation,
             segmentDurationMinutes = state.settings.segmentDurationMinutes,

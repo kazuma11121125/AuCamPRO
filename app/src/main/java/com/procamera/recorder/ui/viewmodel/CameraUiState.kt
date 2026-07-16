@@ -270,6 +270,13 @@ data class CameraUiState(
     // ratio as the signal, so this is opt-in per-recording, not something to leave on.
     val makeupGainDb: Float = 0f,
 
+    // ── High-pass filter (風切り音/ハンドリングノイズ対策のローカット) ──────────
+    // See dsp/HighPassFilter.h's doc — first in the DSP chain (before the EQ), so a boosted
+    // EQ Low band never re-amplifies exactly what this is meant to remove. Off by default;
+    // cutoffHz only matters while enabled is true.
+    val highPassEnabled: Boolean = false,
+    val highPassCutoffHz: Float = 100f,
+
     // ── EQ ───────────────────────────────────────────────────────────────────
     val eqBands: List<EqBandState> = EqBandState.defaults(),
 
@@ -358,6 +365,8 @@ data class CameraUiState(
         val sign = if (makeupGainDb > 0f) "+" else ""
         return "$sign${"%.1f".format(makeupGainDb)}dB"
     }
+
+    val highPassCutoffDisplayText: String get() = "${highPassCutoffHz.toInt()}Hz"
 
     val focusDisplayText: String get() {
         if (focusDistanceDiopters == 0f) return "∞"

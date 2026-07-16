@@ -16,6 +16,16 @@ struct BiquadCoeffs {
 
 BiquadCoeffs computeRbjPeakingCoeffs(double sampleRateHz, double centerFreqHz, double q, double gainDb);
 
+// RBJ Audio Cookbook "High Pass Filter" coefficients — see dsp/HighPassFilter.h for the
+// smoothed, on/off-able wrapper around this that's actually wired into the DSP chain.
+BiquadCoeffs computeRbjHighpassCoeffs(double sampleRateHz, double cutoffFreqHz, double q);
+
+// The a0=1, b0=1, b1=b2=a1=a2=0 identity biquad (bit-exact passthrough) — used by
+// dsp/HighPassFilter.h to represent "disabled" as just another coefficient set, so
+// enabling/disabling can reuse the same click-free ramp mechanism as a cutoff-frequency
+// change instead of needing a separate hard on/off switch.
+BiquadCoeffs identityBiquadCoeffs();
+
 // 3-band parametric peaking EQ (Low/Mid/High), processed in cascade. Coefficients are
 // computed on the UI thread (per spec §4.2) from a knob change and handed to the audio
 // callback thread via a lock-free TripleBuffer (see common/TripleBuffer.h). The audio
