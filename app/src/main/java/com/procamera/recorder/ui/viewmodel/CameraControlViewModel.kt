@@ -16,6 +16,7 @@ import com.procamera.recorder.camera.CaptureRangeClamper
 import com.procamera.recorder.pipeline.RecordingPipeline
 import com.procamera.recorder.utils.ThermalMonitor
 import com.procamera.recorder.utils.UserPreferencesStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -181,8 +182,6 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     private var timerJob: Job? = null
     private var storageJob: Job? = null
 
-    private var lastClippingDetectedMsL = 0L
-    private var lastClippingDetectedMsR = 0L
     private val clippingHoldDurationMs = 3_000L
     private var previewSurface: Surface? = null
 
@@ -777,9 +776,30 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
      * (idempotent, mirroring the pipeline side) since [attachPreviewSurface] can re-enter
      * this while a recording is already in progress (viewfinder reattaching).
      */
+    /**
+     * **実機で発見**: this loop used to run on `viewModelScope.launch {}`'s default
+     * `Dispatchers.Main.immediate` — 4 JNI calls plus a `StateFlow` update every 33ms,
+     * forever, for as long as preview is active (not just while recording), competing with
+     * every other piece of main-thread work (Compose recomposition, the capture-result
+     * `Handler.post` callbacks, ...). [NativeEngineBridge]'s own class doc already
+     * documents that its methods are safe to call from `Dispatchers.Default`/IO — that
+     * design intent just wasn't wired up at this call site. Moved onto `Dispatchers.Default`
+     * so this steady 30Hz tick stops contending with main-thread camera-pipeline work; see
+     * this session's frame-rate-collapse investigation (VideoEncoder's `BufferInfo` reuse
+     * doc has the fuller writeup).
+     *
+     * The clipping-hold timestamps are now locals captured by the loop's closure instead of
+     * instance fields — they were only ever read/written from this loop, but moving the
+     * loop off main-thread-only confinement means [stopMeterPolling] (still called from
+     * main) resetting them concurrently would have been a genuine new data race. Locals
+     * sidestep that entirely: each fresh [startMeterPolling] call gets a zero-initialized
+     * pair, same effective behavior as the old reset-on-stop.
+     */
     private fun startMeterPolling() {
         if (meterJob != null) return
-        meterJob = viewModelScope.launch {
+        meterJob = viewModelScope.launch(Dispatchers.Default) {
+            var lastClippingDetectedMsL = 0L
+            var lastClippingDetectedMsR = 0L
             while (isActive) {
                 delay(33L)
                 val peakL = pipeline.nativeEngine.peakDb(CHANNEL_LEFT)
@@ -804,8 +824,6 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     private fun stopMeterPolling() {
         meterJob?.cancel()
         meterJob = null
-        lastClippingDetectedMsL = 0L
-        lastClippingDetectedMsR = 0L
         _meterState.update {
             it.copy(
                 peakDbL = -120f, peakDbR = -120f, rmsDbL = -120f, rmsDbR = -120f,

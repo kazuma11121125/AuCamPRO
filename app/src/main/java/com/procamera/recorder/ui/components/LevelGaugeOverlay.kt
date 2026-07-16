@@ -35,6 +35,22 @@ import kotlin.math.abs
 private const val LEVEL_THRESHOLD_DEGREES = 1.5f
 
 /**
+ * Signed one-decimal-place formatting without `String.format`/`java.util.Formatter`'s
+ * per-call allocation — this label recomposes on every `TYPE_ROTATION_VECTOR` sensor event
+ * (`SENSOR_DELAY_UI`, tens of Hz), so the Formatter/Locale machinery `"%+.1f°".format(...)`
+ * pulls in on every call was a real, measurable allocation hotspot (実機で発見: correlated
+ * with GC-pressure-driven camera-pipeline frame-rate collapse — see
+ * [com.procamera.recorder.encoder.VideoEncoder]'s `BufferInfo` reuse doc for the same
+ * finding on the encoder side).
+ */
+private fun formatRollDegrees(deg: Float): String {
+    val tenths = Math.round(deg * 10)
+    val sign = if (tenths < 0) "-" else "+"
+    val absTenths = kotlin.math.abs(tenths)
+    return "$sign${absTenths / 10}.${absTenths % 10}°"
+}
+
+/**
  * Buckets [OrientationEventListener]'s 0-359° continuous reading (no range-limit problem,
  * unlike `SensorManager.getOrientation()`'s roll component — see class doc's "real-device
  * bug" note) into the nearest quadrant, then maps to the matching `Surface.ROTATION_*` for
@@ -188,7 +204,7 @@ fun LevelGaugeOverlay(modifier: Modifier = Modifier) {
             }
         }
         Text(
-            text = "%+.1f°".format(rollDegrees),
+            text = formatRollDegrees(rollDegrees),
             color = if (isLevel) MeterGreen else OnSurfacePrimary,
             fontSize = 10.sp,
             fontWeight = FontWeight.Medium,

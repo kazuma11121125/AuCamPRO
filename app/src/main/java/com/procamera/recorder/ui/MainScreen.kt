@@ -1201,11 +1201,22 @@ private fun AudioStatsRow(viewModel: CameraControlViewModel) {
     ) {
         // Louder of the two channels — a compact single figure for this debug-style row;
         // the full per-channel breakdown is the StereoAudioMeter overlay on the preview.
-        StatChip(label = "PEAK", value = "%.1fdB".format(maxOf(meter.peakDbL, meter.peakDbR)))
-        StatChip(label = "RMS", value = "%.1fdB".format(maxOf(meter.rmsDbL, meter.rmsDbR)))
+        // formatDbChip (not String.format) — this row recomposes at the same meter-polling
+        // rate as StereoAudioMeter/AudioMeterBar; see AudioMeterBar.kt's formatDb doc for
+        // why String.format's per-call Formatter allocation matters at that rate.
+        StatChip(label = "PEAK", value = formatDbChip(maxOf(meter.peakDbL, meter.peakDbR)))
+        StatChip(label = "RMS", value = formatDbChip(maxOf(meter.rmsDbL, meter.rmsDbR)))
         StatChip(label = "XRUN", value = meter.xrunCount.toString(), warn = meter.xrunCount > 0)
         StatChip(label = "OVRN", value = meter.ringBufferOverrunCount.toString(), warn = meter.ringBufferOverrunCount > 0)
     }
+}
+
+/** "%.1fdB".format() without java.util.Formatter's per-call allocation — see call site's doc. */
+private fun formatDbChip(db: Float): String {
+    val tenths = Math.round(db * 10)
+    val sign = if (tenths < 0) "-" else ""
+    val absTenths = kotlin.math.abs(tenths)
+    return "$sign${absTenths / 10}.${absTenths % 10}dB"
 }
 
 @Composable

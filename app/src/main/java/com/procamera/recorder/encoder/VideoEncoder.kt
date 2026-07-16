@@ -47,6 +47,20 @@ class VideoEncoder(
     val inputSurface: Surface
     private val eosLatch = CountDownLatch(1)
 
+    // Reused across every onOutputBufferAvailable call instead of allocating a fresh
+    // MediaCodec.BufferInfo per frame (~60/frame/sec at 60fps recording) — real-device
+    // finding: MediaCodec's async callbacks are delivered serially on one internal thread,
+    // so reuse is safe as long as no callee retains the reference past the synchronous
+    // onEncodedFrame() call. SegmentedMuxerController.onVideoSample's own doc already
+    // documents that exact contract (its pending-queue path deep-copies BufferInfo
+    // precisely because it's only valid until "the caller's next callback iteration") — so
+    // this reuse doesn't change any existing safety assumption, just stops paying for a
+    // fresh allocation the consumer side was never relying on. Per-frame allocation across
+    // this and other hot UI/encoder paths was measured (via the camera HAL's own
+    // "video stream"/"preview stream" FPS telemetry) to correlate with a progressive,
+    // GC-pressure-driven frame-rate collapse over a recording session.
+    private val reusableBufferInfo = MediaCodec.BufferInfo()
+
     init {
         val format = MediaFormat.createVideoFormat(mimeType, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
@@ -91,10 +105,8 @@ class VideoEncoder(
                     return
                 }
 
-                val adjustedInfo = MediaCodec.BufferInfo().apply {
-                    set(info.offset, info.size, normalizedPtsUs, info.flags)
-                }
-                callback.onEncodedFrame(buffer, adjustedInfo)
+                reusableBufferInfo.set(info.offset, info.size, normalizedPtsUs, info.flags)
+                callback.onEncodedFrame(buffer, reusableBufferInfo)
                 codec.releaseOutputBuffer(index, false)
                 if (isEndOfStream) eosLatch.countDown()
             }

@@ -70,7 +70,7 @@ fun AudioMeterBar(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            text = if (peakDb <= DB_FLOOR) "···" else "%.1f".format(peakDb),
+            text = if (peakDb <= DB_FLOOR) "···" else formatDb(peakDb),
             color = if (isClippingHeld) MeterRed else OnSurfacePrimary,
             fontFamily = FontFamily.Monospace,
             fontSize = 9.sp,
@@ -163,18 +163,32 @@ fun StereoAudioMeter(
     }
 }
 
-/** Numeric dB scale shared between the L/R bars, mirroring a hardware meter bridge's centre scale. */
+private val TickDbs = listOf(0f, -6f, -12f, -24f, -48f)
+
+/**
+ * Numeric dB scale shared between the L/R bars, mirroring a hardware meter bridge's centre
+ * scale.
+ *
+ * **実機で発見**: this used to allocate a fresh `List` and `android.graphics.Paint` on
+ * every single Canvas draw — at the meter's ~30Hz update rate, that's 30+ allocations/sec
+ * purely for tick-label drawing, which measurably adds to GC pressure shared with the
+ * video/audio encoder threads (see [com.procamera.recorder.encoder.VideoEncoder]'s
+ * `BufferInfo` reuse doc for the same finding on the encoder side). [TickDbs] is now a
+ * module-level constant and [paint] is created once via `remember` and only mutated
+ * (never reallocated) per draw.
+ */
 @Composable
 private fun DbScale(modifier: Modifier = Modifier) {
-    Canvas(modifier = modifier) {
-        val tickDbs = listOf(0f, -6f, -12f, -24f, -48f)
-        val paint = android.graphics.Paint().apply {
+    val paint = androidx.compose.runtime.remember {
+        android.graphics.Paint().apply {
             color = OnSurfaceSecondary.toArgb()
-            textSize = 8.sp.toPx()
             textAlign = android.graphics.Paint.Align.CENTER
             isAntiAlias = true
         }
-        for (tickDb in tickDbs) {
+    }
+    Canvas(modifier = modifier) {
+        paint.textSize = 8.sp.toPx()
+        for (tickDb in TickDbs) {
             val y = size.height * (1f - dbToFraction(tickDb))
             drawContext.canvas.nativeCanvas.drawText(
                 if (tickDb == 0f) "0" else tickDb.toInt().toString(),
@@ -189,6 +203,18 @@ private fun DbScale(modifier: Modifier = Modifier) {
 // ──────────────────────────────────────────────────────────────────────────────
 // Canvas drawing helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One-decimal-place formatting without `String.format`/`java.util.Formatter`'s per-call
+ * `Locale`/`Formatter` allocation — called on every peak-dB label update (~30Hz), same
+ * GC-pressure concern as [DbScale]'s doc.
+ */
+private fun formatDb(db: Float): String {
+    val tenths = Math.round(db * 10)
+    val sign = if (tenths < 0) "-" else ""
+    val absTenths = kotlin.math.abs(tenths)
+    return "$sign${absTenths / 10}.${absTenths % 10}"
+}
 
 private const val DB_FLOOR = -60f      // lowest dBFS displayed
 private const val DB_CEIL = 0f         // top of meter (0 dBFS)
