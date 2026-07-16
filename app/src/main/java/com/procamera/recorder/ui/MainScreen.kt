@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
@@ -65,6 +66,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -1391,14 +1394,34 @@ private fun formatDbChip(db: Float): String {
 @Composable
 private fun StatChip(label: String, value: String, warn: Boolean = false) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        // label is static (never changes after composition) — a plain Text() here is fine.
         Text(text = label, color = OnSurfaceSecondary, fontSize = 9.sp, letterSpacing = 0.8.sp)
-        Text(
-            text = value,
-            color = if (warn) RecRed else OnSurfacePrimary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            fontFamily = FontFamily.Monospace,
-        )
+        // value is Canvas-drawn, not Text() — this row recomposes at the meter-poll rate
+        // (PEAK/RMS), so the same real-device finding as AudioMeterBar's peak-dB label
+        // applies (see its doc): a Text() whose content changes every tick pays for a full
+        // text-layout re-measure plus an accessibility semantics-tree update on every
+        // change, confirmed via on-device atrace.
+        val valueColor = if (warn) RecRed else OnSurfacePrimary
+        val valuePaint = androidx.compose.runtime.remember {
+            android.graphics.Paint().apply {
+                textAlign = android.graphics.Paint.Align.CENTER
+                isAntiAlias = true
+                typeface = android.graphics.Typeface.MONOSPACE
+            }
+        }
+        // Fixed width (not fillMaxWidth): unlike AudioMeterBar/LevelGaugeOverlay's Canvas
+        // labels (each the sole/dominant child of its own constrained parent), this Canvas
+        // sits alongside 3 siblings in AudioStatsRow's unweighted Row — fillMaxWidth here
+        // made every StatChip greedily claim the whole row, collapsing the layout. 56.dp
+        // comfortably fits the longest expected value ("-120.0dB") at 12sp monospace.
+        Canvas(
+            modifier = Modifier.width(56.dp).height(16.dp),
+        ) {
+            valuePaint.textSize = 12.sp.toPx()
+            valuePaint.color = valueColor.toArgb()
+            val baselineY = size.height / 2f - (valuePaint.ascent() + valuePaint.descent()) / 2f
+            drawContext.canvas.nativeCanvas.drawText(value, size.width / 2f, baselineY, valuePaint)
+        }
     }
 }
 
