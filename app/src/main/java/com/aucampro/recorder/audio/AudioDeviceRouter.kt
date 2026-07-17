@@ -52,7 +52,10 @@ class AudioDeviceRouter(context: Context) {
      */
     fun candidateInputDevices(preferredKind: InputKind = InputKind.Auto): List<AudioDeviceInfo> {
         val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-            ?.sortedBy { priorityOf(it.type) }
+            // Secondary key on id: AudioManager doesn't document an ordering for devices of
+            // the same priority tier (e.g. two USB interfaces), so without this the pick
+            // between them would silently depend on OS enumeration order.
+            ?.sortedWith(compareBy({ priorityOf(it.type) }, { it.id }))
             ?: return emptyList()
         if (preferredKind == InputKind.Auto) return devices
         val (matching, rest) = devices.partition { matchesKind(it.type, preferredKind) }

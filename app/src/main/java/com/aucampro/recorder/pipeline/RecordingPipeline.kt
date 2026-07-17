@@ -259,7 +259,7 @@ class RecordingPipeline(private val context: Context) {
     fun setPreferredInputKind(kind: AudioDeviceRouter.InputKind) {
         if (preferredInputKind == kind) return
         preferredInputKind = kind
-        onAudioDeviceSetChanged()
+        dispatchAudioDeviceSetChanged()
     }
 
     /** Fires with a human-readable label (§4.5 "現在の入力デバイス表示") whenever the
@@ -271,7 +271,7 @@ class RecordingPipeline(private val context: Context) {
 
     // Whether live monitoring is actually running right now — the single source of truth
     // [onMonitoringEnabledChanged] reports from, since a toggle-on request can be rejected
-    // (see setMonitoringEnabled's doc) or auto-reverted on hot-swap (onAudioDeviceSetChanged).
+    // (see setMonitoringEnabled's doc) or auto-reverted on hot-swap (onAudioDeviceSetChangedLocked).
     private var monitoringActive = false
 
     /** Fires whenever monitoring's actual on/off state changes — at [setMonitoringEnabled]
@@ -281,7 +281,24 @@ class RecordingPipeline(private val context: Context) {
     var onMonitoringEnabledChanged: ((Boolean) -> Unit)? = null
 
     init {
-        audioDeviceRouter.register { onAudioDeviceSetChanged() }
+        audioDeviceRouter.register { dispatchAudioDeviceSetChanged() }
+    }
+
+    /**
+     * Entry point for both [AudioDeviceRouter.register]'s hot-swap callback (delivered on
+     * its own background `HandlerThread`) and [setPreferredInputKind] (called directly from
+     * the Settings-sheet mic picker on the main thread) — two different threads that used to
+     * call [onAudioDeviceSetChangedLocked]'s predecessor directly, racing the plain `var`
+     * fields it mutates (`audioEngineActive`, `activeInputDeviceId`, `monitoringActive`)
+     * with each other and with [ensureAudioEngineStarted]/[stopAudioEngineIfActive], which
+     * are only ever called from inside [sessionMutex]. Routing both callers through
+     * [pipelineScope] (`Main.immediate`, same reasoning as [onEncoderError]'s doc) plus
+     * [sessionMutex] restores the single-thread-confinement invariant those fields rely on
+     * elsewhere in this class, and serializes hot-swap handling against
+     * [startPreview]/[startRecording]/[stopAll] instead of interleaving with them.
+     */
+    private fun dispatchAudioDeviceSetChanged() {
+        pipelineScope.launch { sessionMutex.withLock { onAudioDeviceSetChangedLocked() } }
     }
 
     /** Idempotent: safe to call even if already running (e.g. recording starting from an
@@ -352,11 +369,18 @@ class RecordingPipeline(private val context: Context) {
      *    output that made it safe to enable (see [setMonitoringEnabled]'s doc) just
      *    disappeared, force it off rather than letting it silently fall back to the
      *    built-in speaker and feed back into the mic.
+     *
+     * Caller must already hold [sessionMutex] (see [dispatchAudioDeviceSetChanged]). The
+     * blocking native calls run inside [withContext]\(Dispatchers.IO\) — same reasoning as
+     * [stopRecordingInternalLockedAsync]'s doc: this used to run every native call
+     * (including [NativeEngineBridge.reopenInputStream], which was already known to be slow
+     * enough to ANR the main thread once before — see [AudioDeviceRouter.register]'s doc) synchronously on
+     * whatever thread called it, which for [setPreferredInputKind] is main.
      */
-    private fun onAudioDeviceSetChanged() {
+    private suspend fun onAudioDeviceSetChangedLocked() {
         if (monitoringActive && !audioDeviceRouter.hasSafeMonitoringOutput()) {
             Log.w(TAG, "Monitoring output device disconnected; disabling monitoring to avoid mic feedback")
-            nativeEngine.setMonitoringEnabled(false)
+            withContext(Dispatchers.IO) { nativeEngine.setMonitoringEnabled(false) }
             monitoringActive = false
             notifyMonitoringChanged(false)
         }
@@ -369,24 +393,27 @@ class RecordingPipeline(private val context: Context) {
         Log.i(TAG, "Input device set changed, switching to ${audioDeviceRouter.labelFor(preferred)} (id=${preferred.id})")
         val gapStartNanos = System.nanoTime()
         var opened: android.media.AudioDeviceInfo? = null
-        for (device in candidates) {
-            val error = nativeEngine.reopenInputStream(device.id)
-            if (error == null) {
-                opened = device
-                break
+        withContext(Dispatchers.IO) {
+            for (device in candidates) {
+                val error = nativeEngine.reopenInputStream(device.id)
+                if (error == null) {
+                    opened = device
+                    break
+                }
+                Log.w(TAG, "reopenInputStream failed on ${audioDeviceRouter.labelFor(device)} (id=${device.id}): $error")
             }
-            Log.w(TAG, "reopenInputStream failed on ${audioDeviceRouter.labelFor(device)} (id=${device.id}): $error")
         }
-        if (opened == null) {
+        val openedDevice = opened
+        if (openedDevice == null) {
             Log.e(TAG, "All candidate input devices failed to reopen after a device change; keeping the previous stream closed")
             return
         }
 
         val gapNanos = System.nanoTime() - gapStartNanos
         val gapFrames = (gapNanos * AUDIO_SAMPLE_RATE_HZ / 1_000_000_000L).toInt()
-        nativeEngine.insertSilence(gapFrames)
-        activeInputDeviceId = opened.id
-        notifyInputDeviceChanged(opened)
+        withContext(Dispatchers.IO) { nativeEngine.insertSilence(gapFrames) }
+        activeInputDeviceId = openedDevice.id
+        notifyInputDeviceChanged(openedDevice)
     }
 
     // ──────────────────────────────────────────────────────────────────────────────
@@ -988,7 +1015,7 @@ class RecordingPipeline(private val context: Context) {
      * currently connected — see [AudioDeviceRouter.hasSafeMonitoringOutput]'s doc for why:
      * monitoring through the built-in speaker while recording from the mic would feed the
      * speaker's own output back into the mic. Already-enabled monitoring is also force-off
-     * if that output later disappears — see [onAudioDeviceSetChanged].
+     * if that output later disappears — see [onAudioDeviceSetChangedLocked].
      */
     fun setMonitoringEnabled(enabled: Boolean, outputDeviceId: Int = 0) {
         if (enabled && !audioDeviceRouter.hasSafeMonitoringOutput()) {
