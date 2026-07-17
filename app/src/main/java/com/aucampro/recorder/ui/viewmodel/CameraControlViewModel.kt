@@ -63,6 +63,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     // frame rate, so this must not live on [_uiState] either.
     private val _histogramBins = MutableStateFlow<FloatArray?>(null)
     val histogramBins: StateFlow<FloatArray?> = _histogramBins.asStateFlow()
+    private var lastPublishedHistogramBins: FloatArray? = null
 
     private var lastAutoKelvin: Double? = null
     private var lastAutoGains: android.hardware.camera2.params.RggbChannelVector? = null
@@ -124,7 +125,20 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         pipeline.onHistogramUpdated = { bins ->
-            _histogramBins.value = bins
+            // Dropped (not published) if effectively unchanged from the last published
+            // bins — real-device finding (PERF_INVESTIGATION_2026-07-17.md §2.3): each
+            // call already gets a *fresh* FloatArray from LuminanceHistogramReader, so
+            // MutableStateFlow's own equals-based conflation (reference equality for
+            // arrays) never once suppressed an emission — a static scene still redrew the
+            // histogram overlay at its full ~5Hz sample rate forever. L1 distance against
+            // the last *published* array (not the last *sampled* one) so small persistent
+            // drift can still accumulate past the threshold and eventually publish, rather
+            // of comparing consecutive samples and never crossing it.
+            val last = lastPublishedHistogramBins
+            if (last == null || histogramL1Distance(last, bins) > HISTOGRAM_PUBLISH_THRESHOLD) {
+                lastPublishedHistogramBins = bins
+                _histogramBins.value = bins
+            }
         }
         pipeline.onAutoFocusMeasured = { focus ->
             lastAutoFocus = focus
@@ -887,10 +901,20 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
             var lastClippingDetectedMsR = 0L
             while (isActive) {
                 delay(METER_POLL_INTERVAL_MS)
-                val peakL = pipeline.nativeEngine.peakDb(CHANNEL_LEFT)
-                val peakR = pipeline.nativeEngine.peakDb(CHANNEL_RIGHT)
-                val rmsL = pipeline.nativeEngine.rmsDb(CHANNEL_LEFT)
-                val rmsR = pipeline.nativeEngine.rmsDb(CHANNEL_RIGHT)
+                // Quantized to METER_DB_STEP before publishing — real-device finding
+                // (PERF_INVESTIGATION_2026-07-17.md §2.3): peakDb/rmsDb are raw floats, so
+                // even silence-floor noise produced a *different* value on essentially
+                // every tick, and MutableStateFlow.update only conflates *equal*
+                // consecutive values — meaning a static/silent scene still recomposed and
+                // redrew AudioMeterHost 20x/sec forever (measured: 31fps of continuous
+                // RenderThread work with nothing on screen actually changing). A 0.5dB step
+                // is well below what's visually distinguishable on the meter bar, so this
+                // costs no perceptible responsiveness while letting StateFlow's own
+                // equality check suppress the redundant emissions.
+                val peakL = quantizeDb(pipeline.nativeEngine.peakDb(CHANNEL_LEFT))
+                val peakR = quantizeDb(pipeline.nativeEngine.peakDb(CHANNEL_RIGHT))
+                val rmsL = quantizeDb(pipeline.nativeEngine.rmsDb(CHANNEL_LEFT))
+                val rmsR = quantizeDb(pipeline.nativeEngine.rmsDb(CHANNEL_RIGHT))
                 val nowMs = System.currentTimeMillis()
                 if (peakL > CLIPPING_THRESHOLD_DB) lastClippingDetectedMsL = nowMs
                 if (peakR > CLIPPING_THRESHOLD_DB) lastClippingDetectedMsR = nowMs
@@ -904,6 +928,17 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+    }
+
+    private fun quantizeDb(db: Float): Float = Math.round(db / METER_DB_STEP) * METER_DB_STEP
+
+    /** Sum of per-bin absolute differences between two equal-length, [0,1]-normalized
+     * histograms — see the `pipeline.onHistogramUpdated` assignment above for why this
+     * gates publishing to [_histogramBins]. */
+    private fun histogramL1Distance(a: FloatArray, b: FloatArray): Float {
+        var sum = 0f
+        for (i in a.indices) sum += kotlin.math.abs(a[i] - b[i])
+        return sum
     }
 
     private fun stopMeterPolling() {
@@ -1049,5 +1084,17 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         // hardware meters commonly refresh 10-20Hz) and cuts this loop's — and therefore
         // the meter composable's — steady-state tick rate by ~1/3 versus the previous 30Hz.
         const val METER_POLL_INTERVAL_MS = 50L
+
+        /** See [quantizeDb]'s call site doc — the dB step below which two meter readings
+         * are treated as "the same" for StateFlow emission purposes. */
+        const val METER_DB_STEP = 0.5f
+
+        /** See [histogramL1Distance]'s call site doc. Each of [LuminanceHistogramReader]'s
+         * [com.aucampro.recorder.camera.LuminanceHistogramReader.HISTOGRAM_BIN_COUNT] bins
+         * is normalized to [0,1] against its own tallest bucket, so this is a fraction of
+         * "one whole bin's worth of normalized height, summed across all bins" — small
+         * enough that a genuinely-changing scene (e.g. panning into brighter/darker area)
+         * crosses it within a couple of samples, not a visually-noticeable publish delay. */
+        const val HISTOGRAM_PUBLISH_THRESHOLD = 0.5f
     }
 }

@@ -36,6 +36,18 @@ import kotlin.math.abs
 
 private const val LEVEL_THRESHOLD_DEGREES = 1.5f
 
+/** Quantization step applied to [rollDegrees] before it's written to state — real-device
+ * finding (PERF_INVESTIGATION_2026-07-17.md §2.3): `TYPE_ROTATION_VECTOR` at
+ * `SENSOR_DELAY_UI` still reports a slightly different value on almost every tick even
+ * when the phone is perfectly still (sensor-fusion noise), and `mutableFloatStateOf` only
+ * suppresses recomposition for *exactly equal* consecutive values — so a static, level
+ * phone was still driving ~16Hz of continuous recomposition/redraw forever. 0.1° matches
+ * [formatRollDegrees]'s own one-decimal display resolution, so this doesn't change what's
+ * shown, only how often a genuinely-unchanged-looking reading re-triggers work. */
+private const val ROLL_QUANTIZE_STEP_DEGREES = 0.1f
+
+private fun quantizeRoll(deg: Float): Float = Math.round(deg / ROLL_QUANTIZE_STEP_DEGREES) * ROLL_QUANTIZE_STEP_DEGREES
+
 /**
  * Signed one-decimal-place formatting without `String.format`/`java.util.Formatter`'s
  * per-call allocation — this label recomposes on every `TYPE_ROTATION_VECTOR` sensor event
@@ -164,7 +176,7 @@ fun LevelGaugeOverlay(modifier: Modifier = Modifier) {
                 // itself wrong — held level in portrait, the gauge read ~-90° (i.e. the
                 // offset was *introducing* the error, not correcting one). Removed;
                 // portrait now uses the same raw remapped value as landscape.
-                rollDegrees = Math.toDegrees(orientation[2].toDouble()).toFloat()
+                rollDegrees = quantizeRoll(Math.toDegrees(orientation[2].toDouble()).toFloat())
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -180,14 +192,23 @@ fun LevelGaugeOverlay(modifier: Modifier = Modifier) {
         }
     }
 
-    val isLevel = abs(rollDegrees) < LEVEL_THRESHOLD_DEGREES
-    val lineColor = if (isLevel) MeterGreen else Color.White
-
+    // isLevel/lineColor are deliberately NOT computed here (composable-body scope) —
+    // real-device finding (PERF_INVESTIGATION_2026-07-17.md §2.3): reading `rollDegrees`
+    // at this level made Compose track the *whole* LevelGaugeOverlay call as depending on
+    // it, so every sensor tick triggered a full recomposition of this composable (and a
+    // fresh lambda allocation for both Canvas calls below) even though only pixels inside
+    // the two Canvases actually need to change. Each is recomputed from `rollDegrees`
+    // independently inside its own `onDraw` lambda instead — Compose's draw phase observes
+    // state reads made *inside* a `Canvas`/`drawBehind` lambda separately from the
+    // composition phase, so a `rollDegrees` change (post-[quantizeRoll]) now only
+    // re-invokes these two draw callbacks, never a full recomposition of this function.
     Column(
         modifier = modifier.rotate(viewRotationDegrees.toFloat()),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Canvas(modifier = Modifier.size(width = 120.dp, height = 24.dp)) {
+            val isLevel = abs(rollDegrees) < LEVEL_THRESHOLD_DEGREES
+            val lineColor = if (isLevel) MeterGreen else Color.White
             // Fixed center reference tick — drawn unrotated; the horizon line below must
             // visually align with this to read "level".
             drawLine(
@@ -217,6 +238,7 @@ fun LevelGaugeOverlay(modifier: Modifier = Modifier) {
             }
         }
         Canvas(modifier = Modifier.fillMaxWidth().height(14.dp)) {
+            val isLevel = abs(rollDegrees) < LEVEL_THRESHOLD_DEGREES
             degreesTextPaint.textSize = 10.sp.toPx()
             degreesTextPaint.color = (if (isLevel) MeterGreen else OnSurfacePrimary).toArgb()
             val baselineY = size.height / 2f - (degreesTextPaint.ascent() + degreesTextPaint.descent()) / 2f

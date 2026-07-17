@@ -18,9 +18,14 @@ class NativeEngineBridge : AutoCloseable {
     // dispatcher thread while close() (RecordingPipeline.stopAll(), from the ViewModel's
     // onCleared()) can run concurrently on another; a plain var risks the poll thread
     // never observing the flip and calling into a native handle nativeDestroy() already
-    // deleted (use-after-free). A single in-flight call can still race past this check,
-    // but that's an unavoidable TOCTOU without adding locking to a ~30fps hot path — this
-    // closes the far larger window where every poll after close() would otherwise crash.
+    // deleted (use-after-free). This flag is still just a TOCTOU-prone fast path (a call
+    // can race past this check into a real JNI call after close() has started) — what
+    // actually closes that window now is `native-lib.cpp`'s `EngineGuard`/`g_registry`
+    // (added 2026-07-17 after a real tombstone in AudioEncoder's drain thread — see
+    // PERF_INVESTIGATION_2026-07-17.md §3.1): nativeDestroy() can't free the engine until
+    // every JNI call already past this flag has returned, so the race this flag can still
+    // lose is merely "one extra call reaches native code before seeing closed==true", not
+    // "that call touches freed memory".
     @Volatile private var closed = false
 
     /** [preferredInputDeviceId] of 0 means "let the OS choose" (oboe::kUnspecified). */
@@ -80,12 +85,21 @@ class NativeEngineBridge : AutoCloseable {
         return raw[0] to raw[1]
     }
 
-    /** Drains up to [maxFrames] stereo frames into [dst] (must be sized >= maxFrames*2). */
-    fun drainEncoderBuffer(dst: FloatArray, maxFrames: Int): Int = nativeDrainEncoderBuffer(handle, dst, maxFrames)
+    /** Drains up to [maxFrames] stereo frames into [dst] (must be sized >= maxFrames*2).
+     * Returns 0 once [closed] (matching an empty-ring-buffer read) rather than making the
+     * JNI call at all — [AudioEncoder]'s drain thread can still be calling this after
+     * [close] has already run on another thread (its final drain loop keeps going past
+     * `stop()`'s join timeout — see [AudioEncoder.stop]'s doc); the native side's own
+     * handle-registry lock (`native-lib.cpp`'s `EngineGuard`) is what actually makes that
+     * safe against a freed engine, this is just skipping the now-guaranteed-no-op call. */
+    fun drainEncoderBuffer(dst: FloatArray, maxFrames: Int): Int =
+        if (closed) 0 else nativeDrainEncoderBuffer(handle, dst, maxFrames)
 
     /** Discards any stale backlog (see `OboeFullDuplexEngine::flushRingBuffer`'s doc) —
      * call before a fresh [com.aucampro.recorder.encoder.AudioEncoder] starts draining. */
-    fun flushRingBuffer() = nativeFlushRingBuffer(handle)
+    fun flushRingBuffer() {
+        if (!closed) nativeFlushRingBuffer(handle)
+    }
 
     override fun close() {
         if (!closed) {

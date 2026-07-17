@@ -285,7 +285,12 @@ class AudioEncoder(
     private companion object {
         const val TAG = "AudioEncoder"
         const val DEQUEUE_TIMEOUT_US = 10_000L
-        const val BUFFER_EMPTY_SLEEP_MS = 2L
+        // 5ms rather than the original 2ms — PERF_INVESTIGATION_2026-07-17.md P7: this
+        // thread runs for the whole preview/recording lifetime (not just while actively
+        // draining), so its steady-state wakeup rate is a real, continuous cost. A block is
+        // ~10.7ms of audio (FRAMES_PER_BLOCK @48kHz), so polling at 5ms still drains with
+        // more than 2x headroom before the ring buffer could back up.
+        const val BUFFER_EMPTY_SLEEP_MS = 5L
         const val DRAIN_THREAD_JOIN_TIMEOUT_MS = 3_000L
 
         // Drain granularity: ~10.7ms @48kHz, comfortably below the ring buffer's ~10s
