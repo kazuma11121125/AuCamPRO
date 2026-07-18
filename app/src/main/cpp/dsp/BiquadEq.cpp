@@ -55,10 +55,16 @@ BiquadCoeffs identityBiquadCoeffs() { return BiquadCoeffs{}; }  // b0=1, everyth
 
 ThreeBandEq::ThreeBandEq(double sampleRateHz, int channelCount)
     : sampleRateHz_(sampleRateHz), channelCount_(channelCount), historyPerChannel_(channelCount) {
+    recomputeRampSamples();
+
     // Spec §4.2 defaults: Low 80Hz Q=0.8 -6dB / Mid 1500Hz Q=1.2 +3dB / High 8000Hz Q=0.7 -4dB.
-    uiSideCoeffs_.bands[0] = computeRbjPeakingCoeffs(sampleRateHz_, 80.0, 0.8, -6.0);
-    uiSideCoeffs_.bands[1] = computeRbjPeakingCoeffs(sampleRateHz_, 1500.0, 1.2, 3.0);
-    uiSideCoeffs_.bands[2] = computeRbjPeakingCoeffs(sampleRateHz_, 8000.0, 0.7, -4.0);
+    bandParams_[0] = {80.0f, 0.8f, -6.0f};
+    bandParams_[1] = {1500.0f, 1.2f, 3.0f};
+    bandParams_[2] = {8000.0f, 0.7f, -4.0f};
+    for (int band = 0; band < kNumBands; ++band) {
+        uiSideCoeffs_.bands[band] =
+            computeRbjPeakingCoeffs(sampleRateHz_, bandParams_[band].freqHz, bandParams_[band].q, bandParams_[band].gainDb);
+    }
 
     currentCoeffs_ = uiSideCoeffs_;
     rampStart_ = uiSideCoeffs_;
@@ -71,8 +77,27 @@ ThreeBandEq::ThreeBandEq(double sampleRateHz, int channelCount)
 }
 
 void ThreeBandEq::setBandParams(int band, float freqHz, float q, float gainDb) {
+    bandParams_[band] = {freqHz, q, gainDb};
     uiSideCoeffs_.bands[band] = computeRbjPeakingCoeffs(sampleRateHz_, freqHz, q, gainDb);
     coeffExchange_.publish(uiSideCoeffs_);
+}
+
+void ThreeBandEq::setSampleRate(double sampleRateHz) {
+    sampleRateHz_ = sampleRateHz;
+    recomputeRampSamples();
+    for (int band = 0; band < kNumBands; ++band) {
+        uiSideCoeffs_.bands[band] =
+            computeRbjPeakingCoeffs(sampleRateHz_, bandParams_[band].freqHz, bandParams_[band].q, bandParams_[band].gainDb);
+    }
+    coeffExchange_.publish(uiSideCoeffs_);
+}
+
+void ThreeBandEq::recomputeRampSamples() {
+    // ~5ms worth of samples at the current rate — was a fixed "240 (~5ms @ 48kHz)"
+    // constant; docs/HIRES_AUDIO_DESIGN.md §6.5 calls out that literal as one of the
+    // 48kHz-keyed spots that must scale with rate instead (96kHz would otherwise ramp in
+    // ~2.5ms — still not a click, but not the intended ramp duration either).
+    rampSamples_ = static_cast<int>(std::lround(sampleRateHz_ * 0.005));
 }
 
 BiquadCoeffs ThreeBandEq::lerp(const BiquadCoeffs &a, const BiquadCoeffs &b, float t) {
@@ -102,7 +127,7 @@ void ThreeBandEq::process(float *interleaved, size_t frameCount) {
         // second knob tweak during an in-flight ramp never produces a discontinuity.
         rampStart_ = currentCoeffs_;
         rampTarget_ = published;
-        rampSamplesRemaining_ = kRampSamples;
+        rampSamplesRemaining_ = rampSamples_;
     }
 
     for (size_t frame = 0; frame < frameCount; ++frame) {
@@ -115,7 +140,7 @@ void ThreeBandEq::process(float *interleaved, size_t frameCount) {
                 // filter would settle ~0.4% short of the requested response forever.
                 currentCoeffs_ = rampTarget_;
             } else {
-                const float t = 1.0f - static_cast<float>(rampSamplesRemaining_) / static_cast<float>(kRampSamples);
+                const float t = 1.0f - static_cast<float>(rampSamplesRemaining_) / static_cast<float>(rampSamples_);
                 for (int band = 0; band < kNumBands; ++band) {
                     currentCoeffs_.bands[band] = lerp(rampStart_.bands[band], rampTarget_.bands[band], t);
                 }

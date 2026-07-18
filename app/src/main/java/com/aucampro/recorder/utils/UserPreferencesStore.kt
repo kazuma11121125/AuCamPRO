@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.net.Uri
 import com.aucampro.recorder.audio.AudioDeviceRouter
+import com.aucampro.recorder.audio.AudioQuality
 import com.aucampro.recorder.ui.viewmodel.CameraUiState
 import com.aucampro.recorder.ui.viewmodel.EqBandState
 import com.aucampro.recorder.ui.viewmodel.FrameLineAspectRatio
@@ -36,6 +37,7 @@ class UserPreferencesStore(context: Context) {
         val afAuto: Boolean,
         val frameLineAspectRatio: FrameLineAspectRatio,
         val audioInputPreference: AudioDeviceRouter.InputKind,
+        val audioQuality: AudioQuality,
         val inputGainDb: Float,
         val makeupGainDb: Float,
         val highPassEnabled: Boolean,
@@ -63,6 +65,9 @@ class UserPreferencesStore(context: Context) {
         audioInputPreference = prefs.getString(KEY_AUDIO_INPUT_PREFERENCE, null)
             ?.let { name -> AudioDeviceRouter.InputKind.entries.firstOrNull { it.name == name } }
             ?: AudioDeviceRouter.InputKind.Auto,
+        audioQuality = prefs.getString(KEY_AUDIO_QUALITY, null)
+            ?.let { name -> AudioQuality.entries.firstOrNull { it.name == name } }
+            ?: AudioQuality.Standard,
         inputGainDb = prefs.getFloat(KEY_INPUT_GAIN, 0f),
         makeupGainDb = prefs.getFloat(KEY_MAKEUP_GAIN, 0f),
         highPassEnabled = prefs.getBoolean(KEY_HIGH_PASS_ENABLED, false),
@@ -123,6 +128,7 @@ class UserPreferencesStore(context: Context) {
             putBoolean(KEY_AF_AUTO, state.afAuto)
             putString(KEY_FRAME_LINE, state.settings.frameLineAspectRatio.name)
             putString(KEY_AUDIO_INPUT_PREFERENCE, state.settings.audioInputPreference.name)
+            putString(KEY_AUDIO_QUALITY, state.settings.audioQuality.name)
             putFloat(KEY_INPUT_GAIN, state.inputGainDb)
             putFloat(KEY_MAKEUP_GAIN, state.makeupGainDb)
             putBoolean(KEY_HIGH_PASS_ENABLED, state.highPassEnabled)
@@ -167,6 +173,7 @@ class UserPreferencesStore(context: Context) {
         const val KEY_AF_AUTO = "af_auto"
         const val KEY_FRAME_LINE = "frame_line_aspect_ratio"
         const val KEY_AUDIO_INPUT_PREFERENCE = "audio_input_preference"
+        const val KEY_AUDIO_QUALITY = "audio_quality"
         const val KEY_INPUT_GAIN = "input_gain_db"
         const val KEY_MAKEUP_GAIN = "makeup_gain_db"
         const val KEY_HIGH_PASS_ENABLED = "high_pass_enabled"

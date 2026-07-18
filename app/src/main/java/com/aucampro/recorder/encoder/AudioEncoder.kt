@@ -19,6 +19,16 @@ import kotlin.concurrent.thread
  * Untested framework glue (needs a live MediaCodec + running NativeEngineBridge) — see
  * docs/ARCHITECTURE.md's note on compile-verified-only status pending Phase 4's
  * end-to-end wiring.
+ *
+ * **Hi-res audio (docs/HIRES_AUDIO_DESIGN.md)**: [captureSampleRateHz] is the *engine's*
+ * actual running rate (may exceed [sampleRateHz], which stays the AAC/MP4 track's fixed
+ * 48kHz target — see that doc's §4 "大原則"). When they differ, this class is the fan-out
+ * point (the *sole* consumer of the SPSC ring buffer — see [NativeEngineBridge]'s class
+ * doc): every drained block is written to [hiResSink] unmodified (raw, at
+ * [captureSampleRateHz]), then decimated down to [sampleRateHz] via [decimator] before
+ * dithering/encoding to AAC, exactly as it always has. [cumulativeSampleCount] and every
+ * PTS derived from it stay in **48kHz-equivalent frame units** throughout — see
+ * [seedAudioAnchor]'s doc for the one place that distinction is easy to get backwards.
  */
 class AudioEncoder(
     private val sampleRateHz: Int,
@@ -27,12 +37,24 @@ class AudioEncoder(
     private val nativeEngine: NativeEngineBridge,
     private val ptsClockDomain: PtsClockDomain,
     private val callback: Callback,
+    private val captureSampleRateHz: Int = sampleRateHz,
+    private val hiResSink: HiResAudioSink? = null,
 ) {
     interface Callback {
         fun onOutputFormatChanged(format: MediaFormat)
         fun onEncodedFrame(buffer: java.nio.ByteBuffer, bufferInfo: MediaCodec.BufferInfo)
         fun onError(exception: Exception)
     }
+
+    init {
+        require(captureSampleRateHz % sampleRateHz == 0) {
+            "captureSampleRateHz ($captureSampleRateHz) must be an integer multiple of sampleRateHz ($sampleRateHz)"
+        }
+    }
+
+    private val decimationFactor = captureSampleRateHz / sampleRateHz
+    private val decimator: Decimator? =
+        if (decimationFactor > 1) Decimator(captureSampleRateHz, sampleRateHz, channelCount) else null
 
     private val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
     private val running = AtomicBoolean(false)
@@ -90,6 +112,17 @@ class AudioEncoder(
      * Fixed by (1) flushing the stale backlog so draining starts from "now", and (2)
      * seeding [cumulativeSampleCount] from the correlation's own frame position instead of
      * 0, so it lines up with the same frame-0 the anchor below is computed against.
+     *
+     * **Hi-res dual-rate note (docs/HIRES_AUDIO_DESIGN.md §4)**: [correlation]'s
+     * `framePosition` is in the *engine's* frame units ([captureSampleRateHz]), because
+     * that's the domain the native ring buffer/stream counts in — so the rate argument
+     * passed to [PtsClockDomain.startAudioAnchorFromFrameCorrelation] must stay
+     * [captureSampleRateHz], NOT [sampleRateHz] (sample 0's wall-clock time is rate-
+     * independent, but converting a frame *count* to a time offset is not). But
+     * [cumulativeSampleCount] itself must stay in 48kHz-equivalent units (everything else
+     * that reads it — PTS math, the AAC encoder's own frame accounting — assumes
+     * [sampleRateHz]), hence the `/ decimationFactor` below: framePosition frames at
+     * [captureSampleRateHz] is `framePosition / decimationFactor` frames at [sampleRateHz].
      */
     private fun seedAudioAnchor() {
         nativeEngine.flushRingBuffer()
@@ -104,10 +137,10 @@ class AudioEncoder(
             val correlation = nativeEngine.getInputTimestamp()
             if (correlation != null) {
                 val (framePosition, timeNanos) = correlation
-                ptsClockDomain.startAudioAnchorFromFrameCorrelation(framePosition, timeNanos, sampleRateHz)
+                ptsClockDomain.startAudioAnchorFromFrameCorrelation(framePosition, timeNanos, captureSampleRateHz)
                 // Aligns this encoder's own frame counter to the stream's true position
                 // (this method's doc) rather than assuming draining starts at frame 0.
-                cumulativeSampleCount = framePosition
+                cumulativeSampleCount = framePosition / decimationFactor
                 return
             }
             Thread.sleep(ANCHOR_CORRELATION_RETRY_SLEEP_MS)
@@ -154,7 +187,14 @@ class AudioEncoder(
     }
 
     private fun drainLoop() {
-        val floatScratch = FloatArray(FRAMES_PER_BLOCK * channelCount)
+        // Sized in *capture-rate* frames — [framesPerBlock] frames raw drain from the ring
+        // buffer, then (when [decimator] is active) decimated down to ~[FRAMES_PER_BLOCK]
+        // frames' worth of AAC input, keeping this loop's steady-state cadence the same
+        // regardless of [captureSampleRateHz] (docs/HIRES_AUDIO_DESIGN.md §6.5's
+        // FRAMES_PER_BLOCK note).
+        val framesPerBlock = FRAMES_PER_BLOCK * decimationFactor
+        val rawScratch = FloatArray(framesPerBlock * channelCount)
+        val decimatedScratch = FloatArray(framesPerBlock * channelCount)
         val shortScratch = ShortArray(FRAMES_PER_BLOCK * channelCount)
         val byteScratch = java.nio.ByteBuffer.allocateDirect(shortScratch.size * 2).order(java.nio.ByteOrder.LITTLE_ENDIAN)
         val bufferInfo = MediaCodec.BufferInfo()
@@ -163,8 +203,29 @@ class AudioEncoder(
         // "nothing left to do right now" case both the steady-state loop and the final
         // drain below need to distinguish from "encoded a block, possibly non-monotonic").
         fun drainOneBlock(): Boolean {
-            val framesRead = nativeEngine.drainEncoderBuffer(floatScratch, FRAMES_PER_BLOCK)
-            if (framesRead == 0) return false
+            val rawFramesRead = nativeEngine.drainEncoderBuffer(rawScratch, framesPerBlock)
+            if (rawFramesRead == 0) return false
+
+            // Fan-out per docs/HIRES_AUDIO_DESIGN.md §4: the WAV sidecar gets the raw,
+            // undecimated block exactly as captured — this is the *only* other consumer of
+            // this block, driven from this same drain thread (never a second ring-buffer
+            // reader; see NativeEngineBridge's class doc on the SPSC invariant).
+            hiResSink?.writeFrames(rawScratch, rawFramesRead)
+
+            val aacScratch: FloatArray
+            val framesRead: Int
+            if (decimator != null) {
+                framesRead = decimator.process(rawScratch, rawFramesRead, decimatedScratch)
+                aacScratch = decimatedScratch
+                // A small raw block can decimate down to zero output frames (e.g. 3 raw
+                // frames at a 4:1 factor) — the ring buffer genuinely had data (so the
+                // caller should keep draining, not sleep), there's just nothing to feed
+                // the AAC path yet this call.
+                if (framesRead == 0) return true
+            } else {
+                framesRead = rawFramesRead
+                aacScratch = rawScratch
+            }
             val sampleCount = framesRead * channelCount
 
             // In place on the reused scratch buffers, converting only the first
@@ -176,7 +237,7 @@ class AudioEncoder(
             // feeding the encoder stale/reused shortScratch content instead of the
             // just-converted samples (real-device finding: this is what made recorded
             // audio sound like garbled noise rather than the captured signal).
-            PcmDither.floatToInt16Tpdf(floatScratch, shortScratch, sampleCount)
+            PcmDither.floatToInt16Tpdf(aacScratch, shortScratch, sampleCount)
 
             val ptsUs = ptsClockDomain.normalizeAudioPtsUs(cumulativeSampleCount, sampleRateHz)
             cumulativeSampleCount += framesRead
@@ -226,7 +287,15 @@ class AudioEncoder(
         } finally {
             // Only this thread ever calls dequeue/queueInputBuffer, so it's the only safe
             // owner of stop()/release() too — see [stop]'s doc for the cross-thread race
-            // this replaced.
+            // this replaced. Same reasoning extends to hiResSink: this is the only thread
+            // that ever calls writeFrames() on it, so it's the only safe owner of close()
+            // too — swallows exceptions so a WAV I/O failure never prevents the codec
+            // cleanup right below it from running.
+            try {
+                hiResSink?.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "hiResSink close failed", e)
+            }
             codec.stop()
             codec.release()
         }

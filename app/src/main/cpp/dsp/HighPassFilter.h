@@ -27,13 +27,17 @@ namespace aucampro {
 // like any other parameter change instead of clicking.
 class HighPassFilter {
 public:
-    static constexpr int kRampSamples = 240;  // ~5ms @ 48kHz, matches ThreeBandEq's kRampSamples
-
     HighPassFilter(double sampleRateHz, int channelCount);
 
     // UI thread only.
     void setEnabled(bool enabled);
     void setCutoffHz(float cutoffHz);
+
+    // UI thread only, engine-reconfigure context (docs/HIRES_AUDIO_DESIGN.md §4/§6.5) —
+    // NOT a live per-sample-callback operation. Recomputes the coefficient target (and the
+    // ramp duration) for a new sample rate from the existing enabled_/cutoffHz_ state, so
+    // a rate change doesn't silently reset this filter to disabled.
+    void setSampleRate(double sampleRateHz);
 
     // Audio callback thread only. In-place, RT-safe (no allocation, no locks).
     void process(float *interleaved, size_t frameCount);
@@ -44,11 +48,13 @@ private:
     };
 
     void publishCurrentTarget();
+    void recomputeRampSamples();
     static float processSample(float x, const BiquadCoeffs &c, FilterHistory *h);
     static BiquadCoeffs lerp(const BiquadCoeffs &a, const BiquadCoeffs &b, float t);
 
     double sampleRateHz_;
     int channelCount_;
+    int rampSamples_;  // ~5ms worth of samples at sampleRateHz_; see .cpp for rationale
 
     // UI-thread-owned source of truth; only ever touched from setEnabled()/setCutoffHz().
     bool enabled_ = false;

@@ -3,6 +3,7 @@ package com.aucampro.recorder.ui.viewmodel
 import androidx.compose.runtime.Immutable
 import android.net.Uri
 import com.aucampro.recorder.audio.AudioDeviceRouter
+import com.aucampro.recorder.audio.AudioQuality
 import com.aucampro.recorder.camera.CameraCapabilityInspector
 import com.aucampro.recorder.camera.CaptureRangeClamper
 import com.aucampro.recorder.camera.FocusController
@@ -181,6 +182,8 @@ data class SettingsState(
     val frameLineAspectRatio: FrameLineAspectRatio = FrameLineAspectRatio.Off,
     /** Manual mic override (§4.2) — see [AudioDeviceRouter.InputKind]'s doc. */
     val audioInputPreference: AudioDeviceRouter.InputKind = AudioDeviceRouter.InputKind.Auto,
+    /** ハイレゾ録音 (docs/HIRES_AUDIO_DESIGN.md §2/§5) — see [AudioQuality]'s doc. */
+    val audioQuality: AudioQuality = AudioQuality.Standard,
     val showSettingsSheet: Boolean = false,
 )
 
@@ -277,6 +280,13 @@ data class CameraUiState(
      * [com.aucampro.recorder.audio.AudioDeviceRouter] actually landed on — "USB Audio" /
      * "有線ヘッドセット" / "内蔵マイク" / "既定" before the audio engine has started once. */
     val audioInputDeviceLabel: String = "既定",
+
+    /** Human-readable label (docs/HIRES_AUDIO_DESIGN.md §5 "実確定フォーマットラベル")
+     * for the audio engine's *actual* current capture rate/format — "48kHz" / "96kHz/32bit
+     * Float" / "48kHz (ハイレゾ非対応デバイス)" if a hi-res request fell back. Reports what
+     * [RecordingPipeline] actually landed on, not just [SettingsState.audioQuality]'s
+     * request — same "never silently fake it" principle as [audioInputDeviceLabel]. */
+    val audioFormatLabel: String = "48kHz",
 
     // ── Input gain (record level) ───────────────────────────────────────────
     // Post-ADC digital gain, applied before EQ/limiter — see dsp/InputGain.h. Range is

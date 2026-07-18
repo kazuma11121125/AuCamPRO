@@ -1174,6 +1174,32 @@ private fun LazyListScope.audioControlsPanelItems(
         }
     }
 
+    // 実確定フォーマット (docs/HIRES_AUDIO_DESIGN.md §5) — what the engine actually landed
+    // on, not just the Settings sheet's audioQuality request; see that field's own doc.
+    item {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "FORMAT",
+                color = OnSurfaceSecondary,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 1.sp,
+            )
+            Text(
+                text = state.audioFormatLabel,
+                color = OnSurfacePrimary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+    }
+
     // xRun / overrun stats — collects viewModel.meterState itself (see AudioStatsRow's
     // doc) so this ~30Hz churn only recomposes this one row, not the EQ sliders below.
     item { AudioStatsRow(viewModel = viewModel) }

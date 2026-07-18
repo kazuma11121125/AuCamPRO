@@ -166,6 +166,11 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         pipeline.onAudioInputDeviceChanged = { label ->
             _uiState.update { it.copy(audioInputDeviceLabel = label) }
         }
+        // ハイレゾ録音の実確定フォーマット (docs/HIRES_AUDIO_DESIGN.md §5) — see
+        // RecordingPipeline.onAudioFormatChanged's doc.
+        pipeline.onAudioFormatChanged = { label ->
+            _uiState.update { it.copy(audioFormatLabel = label) }
+        }
         // §4.5 モニタリング再生: pipeline is the source of truth for whether monitoring is
         // actually on (a toggle-on request can be rejected, or auto-reverted on headphone
         // unplug — see RecordingPipeline.setMonitoringEnabled's doc), so the switch reflects
@@ -313,6 +318,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         setAfAuto(saved.afAuto)
         setFrameLineAspectRatio(saved.frameLineAspectRatio)
         setAudioInputPreference(saved.audioInputPreference)
+        setAudioQuality(saved.audioQuality)
         setInputGainDb(saved.inputGainDb)
         setMakeupGainDb(saved.makeupGainDb)
         setHighPassEnabled(saved.highPassEnabled)
@@ -816,6 +822,17 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     fun setAudioInputPreference(kind: com.aucampro.recorder.audio.AudioDeviceRouter.InputKind) {
         _uiState.update { it.copy(settings = it.settings.copy(audioInputPreference = kind)) }
         pipeline.setPreferredInputKind(kind)
+    }
+
+    /** Settings sheet "音声品質" picker (docs/HIRES_AUDIO_DESIGN.md §2/§5) — see
+     * [com.aucampro.recorder.audio.AudioQuality]'s doc. No-op while RECORDING; the UI is
+     * expected to disable this control during a take (see [RecordingPipeline.setAudioQuality]'s
+     * doc), so the state update below is skipped too in that case rather than showing a
+     * selection that silently didn't take effect. */
+    fun setAudioQuality(quality: com.aucampro.recorder.audio.AudioQuality) {
+        if (_uiState.value.recordingState == RecordingUiState.Recording) return
+        _uiState.update { it.copy(settings = it.settings.copy(audioQuality = quality)) }
+        pipeline.setAudioQuality(quality)
     }
 
     // ──────────────────────────────────────────────────────────────────────────

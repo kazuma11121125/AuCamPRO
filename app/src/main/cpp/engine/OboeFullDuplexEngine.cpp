@@ -8,18 +8,31 @@
 namespace aucampro {
 
 OboeFullDuplexEngine::OboeFullDuplexEngine()
-    : highPassFilter_(kSampleRate, kChannelCount),
-      eq_(kSampleRate, kChannelCount),
+    : highPassFilter_(kStandardSampleRate, kChannelCount),
+      eq_(kStandardSampleRate, kChannelCount),
       limiter_(-1.0f),
-      meter_(kSampleRate),
+      meter_(kStandardSampleRate),
       ringBuffer_(kRingBufferCapacityFrames * kChannelCount) {}
 
 OboeFullDuplexEngine::~OboeFullDuplexEngine() { stop(); }
 
 Result<std::shared_ptr<oboe::AudioStream>, std::string> OboeFullDuplexEngine::openInputStreamLocked(
-    int32_t deviceId) {
+    int32_t deviceId, int32_t sampleRateHz) {
     // Fallback ladder per §4.2: try the ideal config first, then relax SharingMode, then
     // relax InputPreset. Every downgrade is logged — never silent.
+    //
+    // Hi-res capability detection (docs/HIRES_AUDIO_DESIGN.md §3): for a non-standard
+    // (hi-res) request, sample-rate conversion is disabled below — Oboe's own docs note
+    // "No conversion by Oboe. Underlying APIs may still do conversion", so this alone
+    // isn't a hardware guarantee, but combined with this method's post-open
+    // getSampleRate()-vs-requested guard (below) it's what makes [start]'s rate fallback
+    // ladder trustworthy instead of silently accepting an OS-upsampled fake hi-res stream.
+    // The standard (48kHz) path keeps the original Medium-quality conversion behavior
+    // unchanged — that's the real-device-proven config this app already shipped with, and
+    // still needs conversion allowed for e.g. a mono mic being channel-converted to stereo.
+    const bool isHiRes = sampleRateHz != kStandardSampleRate;
+    const oboe::SampleRateConversionQuality rateConversionQuality =
+        isHiRes ? oboe::SampleRateConversionQuality::None : oboe::SampleRateConversionQuality::Medium;
     struct Attempt {
         oboe::SharingMode sharingMode;
         oboe::InputPreset inputPreset;
@@ -56,12 +69,12 @@ Result<std::shared_ptr<oboe::AudioStream>, std::string> OboeFullDuplexEngine::op
             ->setPerformanceMode(oboe::PerformanceMode::None)
             ->setSharingMode(attempt.sharingMode)
             ->setFormat(oboe::AudioFormat::Float)
-            ->setSampleRate(kSampleRate)
+            ->setSampleRate(sampleRateHz)
             ->setChannelCount(kChannelCount)
             ->setInputPreset(attempt.inputPreset)
             ->setFormatConversionAllowed(true)
             ->setChannelConversionAllowed(true)
-            ->setSampleRateConversionQuality(oboe::SampleRateConversionQuality::Medium)
+            ->setSampleRateConversionQuality(rateConversionQuality)
             ->setDataCallback(this)
             ->setErrorCallback(this);
         if (deviceId != oboe::kUnspecified) {
@@ -91,15 +104,15 @@ Result<std::shared_ptr<oboe::AudioStream>, std::string> OboeFullDuplexEngine::op
         }
 
         // The entire DSP chain (EQ/limiter/meter) and the ring buffer's frame math
-        // hard-assume kChannelCount/kSampleRate interleaved float frames. setFormat/
+        // hard-assume kChannelCount/sampleRateHz interleaved float frames. setFormat/
         // SampleRate/ChannelConversionAllowed(true) above ask Oboe to make that true
         // regardless of the device's native config, but this has not been verified on a
         // real device (§ "確信度の明示" — no hardware available in this environment), so
         // fail loudly here rather than silently misinterpret e.g. a mono stream as
         // interleaved stereo (which would corrupt every sample, not just degrade quality).
-        if (stream->getChannelCount() != kChannelCount || stream->getSampleRate() != kSampleRate) {
+        if (stream->getChannelCount() != kChannelCount || stream->getSampleRate() != sampleRateHz) {
             AUCAMPRO_LOGE("Input stream opened with unexpected config: channels=%d rate=%d (expected %d/%d)",
-                            stream->getChannelCount(), stream->getSampleRate(), kChannelCount, kSampleRate);
+                            stream->getChannelCount(), stream->getSampleRate(), kChannelCount, sampleRateHz);
             stream->close();
             return Result<std::shared_ptr<oboe::AudioStream>, std::string>::Err(
                 "Input stream channel/sample-rate conversion did not produce the expected format");
@@ -121,23 +134,52 @@ Result<std::shared_ptr<oboe::AudioStream>, std::string> OboeFullDuplexEngine::op
         "All input stream open attempts failed (Exclusive/Shared x Unprocessed/VoiceRecognition)");
 }
 
-Result<void, std::string> OboeFullDuplexEngine::start(int32_t preferredInputDeviceId) {
+Result<void, std::string> OboeFullDuplexEngine::start(int32_t preferredInputDeviceId,
+                                                          int32_t requestedSampleRateHz) {
     std::lock_guard<std::mutex> lock(streamMutex_);
 
-    auto openResult = openInputStreamLocked(preferredInputDeviceId);
-    if (openResult.isErr()) {
-        return Result<void, std::string>::Err(openResult.error());
-    }
-    inputStream_ = openResult.value();
+    // Rate fallback ladder (docs/HIRES_AUDIO_DESIGN.md §3): descend from
+    // requestedSampleRateHz through the standard rungs, skipping any rung above the
+    // request. kStandardSampleRate is always included and tried last, so this always has
+    // at least one candidate and (barring a device-level failure unrelated to rate) always
+    // succeeds — same "never silently fail to record" guarantee as the SharingMode/
+    // InputPreset ladder inside openInputStreamLocked.
+    static constexpr int32_t kRateLadder[] = {192000, 96000, kStandardSampleRate};
+    std::string lastError = "no candidate sample rate attempted";
+    for (int32_t candidateRateHz : kRateLadder) {
+        if (candidateRateHz > requestedSampleRateHz) {
+            continue;
+        }
+        auto openResult = openInputStreamLocked(preferredInputDeviceId, candidateRateHz);
+        if (openResult.isErr()) {
+            lastError = openResult.error();
+            continue;
+        }
 
-    const oboe::Result startResult = inputStream_->requestStart();
-    if (startResult != oboe::Result::OK) {
-        inputStream_->close();
-        inputStream_.reset();
-        return Result<void, std::string>::Err(std::string("requestStart failed: ") +
-                                                oboe::convertToText(startResult));
+        if (candidateRateHz != requestedSampleRateHz) {
+            AUCAMPRO_LOGW("Hi-res sample rate fallback: requested %d, granted %d",
+                            requestedSampleRateHz, candidateRateHz);
+        }
+        inputStream_ = openResult.value();
+        sampleRateHz_ = candidateRateHz;
+        // Keeps the user's existing HighPass/EQ settings intact across the rate change —
+        // see BiquadEq.h/HighPassFilter.h's setSampleRate() docs for why this recomputes
+        // in place rather than needing these objects reconstructed.
+        highPassFilter_.setSampleRate(sampleRateHz_);
+        eq_.setSampleRate(sampleRateHz_);
+        meter_.setSampleRate(sampleRateHz_);
+
+        const oboe::Result startResult = inputStream_->requestStart();
+        if (startResult != oboe::Result::OK) {
+            inputStream_->close();
+            inputStream_.reset();
+            return Result<void, std::string>::Err(std::string("requestStart failed: ") +
+                                                    oboe::convertToText(startResult));
+        }
+        return Result<void, std::string>::Ok();
     }
-    return Result<void, std::string>::Ok();
+
+    return Result<void, std::string>::Err("All sample-rate fallback attempts failed: " + lastError);
 }
 
 void OboeFullDuplexEngine::stop() {
@@ -174,7 +216,10 @@ Result<void, std::string> OboeFullDuplexEngine::reopenInputStream(int32_t device
         inputStream_.reset();
     }
 
-    auto openResult = openInputStreamLocked(deviceId);
+    // Device hot-swap only — keeps the engine's current sampleRateHz_ (set by [start]),
+    // never changes rate here. A rate change is a distinct, explicit user action (Settings
+    // quality picker) handled entirely by re-calling [start], not by this method.
+    auto openResult = openInputStreamLocked(deviceId, sampleRateHz_);
     if (openResult.isErr()) {
         return Result<void, std::string>::Err(openResult.error());
     }
@@ -221,12 +266,17 @@ Result<void, std::string> OboeFullDuplexEngine::setMonitoringEnabled(bool enable
         return Result<void, std::string>::Ok();
     }
 
+    // sampleRateHz_ (the engine's current *input* rate), not a fixed constant — a
+    // real-device-relevant fix (docs/HIRES_AUDIO_DESIGN.md §4/§6.5): onAudioReady() below
+    // writes each callback's numFrames straight through to this output stream, so if the
+    // engine is running hi-res (e.g. 96kHz) while this stream opened at a stale 48kHz, the
+    // monitor passthrough would play back at roughly 2x speed/pitch.
     oboe::AudioStreamBuilder builder;
     builder.setDirection(oboe::Direction::Output)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
         ->setSharingMode(oboe::SharingMode::Shared)
         ->setFormat(oboe::AudioFormat::Float)
-        ->setSampleRate(kSampleRate)
+        ->setSampleRate(sampleRateHz_)
         ->setChannelCount(kChannelCount)
         ->setUsage(oboe::Usage::Media)
         ->setFormatConversionAllowed(true)

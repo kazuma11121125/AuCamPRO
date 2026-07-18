@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "dsp/BiquadEq.h"
+#include "dsp/HighPassFilter.h"
 
 using aucampro::BiquadCoeffs;
 using aucampro::computeRbjPeakingCoeffs;
@@ -99,9 +100,12 @@ TEST(BiquadEqTest, RampConvergesExactlyToRequestedGainAfterSettling) {
     eq.setBandParams(2, 8000.0f, 0.7f, 0.0f);
     eq.setBandParams(1, kFreq, kQ, kGainDb);
 
-    // Run well past kRampSamples so the coefficient ramp has fully settled before
-    // measurement begins.
-    std::vector<float> warmup(aucampro::ThreeBandEq::kRampSamples * 4, 0.0f);
+    // Run well past the ramp length so the coefficient ramp has fully settled before
+    // measurement begins. The ramp is ~5ms worth of samples at the engine's rate (240 at
+    // this test's 48kHz — see ThreeBandEq::recomputeRampSamples, no longer a fixed public
+    // constant since docs/HIRES_AUDIO_DESIGN.md made it rate-dependent); 1000 samples is a
+    // generous, rate-independent margin past that.
+    std::vector<float> warmup(1000, 0.0f);
     eq.process(warmup.data(), warmup.size());
 
     constexpr int kSettleCycles = 200;
@@ -146,4 +150,84 @@ TEST(BiquadEqTest, DefaultThreeBandSpecValuesProduceStableOutput) {
     for (float sample : block) {
         EXPECT_TRUE(std::isfinite(sample));
     }
+}
+
+namespace {
+// Measures |output|/|input| RMS ratio in dB for a sine at freqHz, running enough samples
+// first to clear a coefficient ramp regardless of the current rate's ramp length.
+double measureAppliedGainDb(aucampro::ThreeBandEq *eq, double sampleRateHz, float freqHz) {
+    const int samplesPerCycle = static_cast<int>(sampleRateHz / freqHz);
+    std::vector<float> warmup(samplesPerCycle * 400, 0.0f);
+    eq->process(warmup.data(), static_cast<int>(warmup.size()));
+
+    const double omega = 2.0 * M_PI * freqHz / sampleRateHz;
+    const int n = samplesPerCycle * 200;
+    std::vector<float> input(n), measure(n);
+    for (int i = 0; i < n; ++i) input[i] = static_cast<float>(std::sin(omega * i));
+    measure = input;
+    eq->process(measure.data(), n);
+
+    double inSumSq = 0.0, outSumSq = 0.0;
+    for (int i = 0; i < n; ++i) {
+        inSumSq += static_cast<double>(input[i]) * input[i];
+        outSumSq += static_cast<double>(measure[i]) * measure[i];
+    }
+    return 20.0 * std::log10(std::sqrt(outSumSq / n) / std::sqrt(inSumSq / n));
+}
+}  // namespace
+
+TEST(BiquadEqTest, SetSampleRatePreservesBandGainAtNewRate) {
+    // docs/HIRES_AUDIO_DESIGN.md §4/§6.5: an engine rate change (Settings quality picker)
+    // must not silently reset the user's EQ settings back to the power-on defaults —
+    // setSampleRate() re-derives each band's coefficients from its last-set freq/q/gainDb
+    // at the new rate rather than needing the object destroyed/reconstructed.
+    constexpr float kFreq = 1000.0f;
+    constexpr float kGainDb = 9.0f;
+    aucampro::ThreeBandEq eq(48000.0, 1);
+    eq.setBandParams(0, 80.0f, 0.8f, 0.0f);
+    eq.setBandParams(2, 8000.0f, 0.7f, 0.0f);
+    eq.setBandParams(1, kFreq, 1.0f, kGainDb);
+
+    const double gainAt48k = measureAppliedGainDb(&eq, 48000.0, kFreq);
+    EXPECT_NEAR(gainAt48k, kGainDb, 0.3);
+
+    eq.setSampleRate(96000.0);
+    const double gainAt96k = measureAppliedGainDb(&eq, 96000.0, kFreq);
+    EXPECT_NEAR(gainAt96k, kGainDb, 0.3);
+}
+
+TEST(HighPassFilterTest, SetSampleRatePreservesEnabledStateAndAttenuatesLowFreqAtNewRate) {
+    aucampro::HighPassFilter hpf(48000.0, 1);
+    hpf.setEnabled(true);
+    hpf.setCutoffHz(200.0f);
+
+    // Settle the ramp, then confirm a well-below-cutoff tone is attenuated at 48kHz.
+    std::vector<float> warmup(2000, 0.0f);
+    hpf.process(warmup.data(), warmup.size());
+
+    auto measureLowFreqGainDb = [](aucampro::HighPassFilter *filter, double sampleRateHz, float freqHz) {
+        const double omega = 2.0 * M_PI * freqHz / sampleRateHz;
+        const int n = static_cast<int>(sampleRateHz / freqHz) * 50;
+        std::vector<float> input(n), measure(n);
+        for (int i = 0; i < n; ++i) input[i] = static_cast<float>(std::sin(omega * i));
+        measure = input;
+        filter->process(measure.data(), n);
+        double inSumSq = 0.0, outSumSq = 0.0;
+        for (int i = 0; i < n; ++i) {
+            inSumSq += static_cast<double>(input[i]) * input[i];
+            outSumSq += static_cast<double>(measure[i]) * measure[i];
+        }
+        return 20.0 * std::log10(std::sqrt(outSumSq / n) / std::sqrt(inSumSq / n));
+    };
+
+    const double gainBefore = measureLowFreqGainDb(&hpf, 48000.0, 40.0f);
+    EXPECT_LT(gainBefore, -6.0);  // 40Hz is well below the 200Hz cutoff — must be attenuated
+
+    // Rate change (docs/HIRES_AUDIO_DESIGN.md §4/§6.5): must stay enabled at the same
+    // cutoff, not silently revert to bypass.
+    hpf.setSampleRate(96000.0);
+    std::vector<float> warmup96(4000, 0.0f);
+    hpf.process(warmup96.data(), warmup96.size());
+    const double gainAfter = measureLowFreqGainDb(&hpf, 96000.0, 40.0f);
+    EXPECT_LT(gainAfter, -6.0);
 }

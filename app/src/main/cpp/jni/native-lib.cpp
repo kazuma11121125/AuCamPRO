@@ -89,16 +89,27 @@ JNIEXPORT void JNICALL Java_com_aucampro_recorder_audio_NativeEngineBridge_nativ
     delete engine;
 }
 
-// Returns null on success, an error description string on failure.
+// Returns null on success, an error description string on failure. requestedSampleRateHz
+// drives the hi-res sample-rate fallback ladder (docs/HIRES_AUDIO_DESIGN.md §3) — see
+// OboeFullDuplexEngine::start's doc; the actually-granted rate is queryable afterward via
+// nativeGetActualSampleRate.
 JNIEXPORT jstring JNICALL Java_com_aucampro_recorder_audio_NativeEngineBridge_nativeStart(
-    JNIEnv *env, jobject, jlong handle, jint preferredInputDeviceId) {
+    JNIEnv *env, jobject, jlong handle, jint preferredInputDeviceId, jint requestedSampleRateHz) {
     EngineGuard guard(handle);
     if (guard.get() == nullptr) return toJString(env, "Engine already destroyed");
-    auto result = guard.get()->start(preferredInputDeviceId);
+    auto result = guard.get()->start(preferredInputDeviceId, requestedSampleRateHz);
     if (result.isErr()) {
         return toJString(env, result.error());
     }
     return nullptr;
+}
+
+// The engine's actual current sample rate (after any hi-res fallback) — 0 if the engine
+// has already been destroyed.
+JNIEXPORT jint JNICALL Java_com_aucampro_recorder_audio_NativeEngineBridge_nativeGetActualSampleRate(
+    JNIEnv *, jobject, jlong handle) {
+    EngineGuard guard(handle);
+    return guard.get() != nullptr ? guard.get()->sampleRateHz() : 0;
 }
 
 JNIEXPORT void JNICALL Java_com_aucampro_recorder_audio_NativeEngineBridge_nativeStop(JNIEnv *, jobject,

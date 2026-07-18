@@ -1,9 +1,12 @@
 #include "dsp/HighPassFilter.h"
 
+#include <cmath>
+
 namespace aucampro {
 
 HighPassFilter::HighPassFilter(double sampleRateHz, int channelCount)
     : sampleRateHz_(sampleRateHz), channelCount_(channelCount), historyPerChannel_(channelCount) {
+    recomputeRampSamples();
     // Starts disabled (identity/bypass) — matches CameraUiState.highPassEnabled's default.
     const BiquadCoeffs initial = identityBiquadCoeffs();
     currentCoeffs_ = initial;
@@ -21,6 +24,19 @@ void HighPassFilter::setCutoffHz(float cutoffHz) {
     cutoffHz_ = cutoffHz;
     if (enabled_) publishCurrentTarget();  // disabled: no audible effect, and avoids an
                                             // unnecessary ramp restart while off
+}
+
+void HighPassFilter::setSampleRate(double sampleRateHz) {
+    sampleRateHz_ = sampleRateHz;
+    recomputeRampSamples();
+    publishCurrentTarget();  // recomputes from existing enabled_/cutoffHz_, not a reset
+}
+
+void HighPassFilter::recomputeRampSamples() {
+    // See ThreeBandEq::recomputeRampSamples's identical doc — same 48kHz-keyed-constant
+    // fix (docs/HIRES_AUDIO_DESIGN.md §6.5), applied here too since this class ramps
+    // independently of ThreeBandEq.
+    rampSamples_ = static_cast<int>(std::lround(sampleRateHz_ * 0.005));
 }
 
 void HighPassFilter::publishCurrentTarget() {
@@ -61,7 +77,7 @@ void HighPassFilter::process(float *interleaved, size_t frameCount) {
         // itself) — see ThreeBandEq::process's identical reasoning for why.
         rampStart_ = currentCoeffs_;
         rampTarget_ = published;
-        rampSamplesRemaining_ = kRampSamples;
+        rampSamplesRemaining_ = rampSamples_;
     }
 
     // Cheap bypass for the steady-state disabled case (matches InputGain/MakeupGain's own
@@ -78,7 +94,7 @@ void HighPassFilter::process(float *interleaved, size_t frameCount) {
             if (rampSamplesRemaining_ == 0) {
                 currentCoeffs_ = rampTarget_;  // snap exactly to target on the final sample
             } else {
-                const float t = 1.0f - static_cast<float>(rampSamplesRemaining_) / static_cast<float>(kRampSamples);
+                const float t = 1.0f - static_cast<float>(rampSamplesRemaining_) / static_cast<float>(rampSamples_);
                 currentCoeffs_ = lerp(rampStart_, rampTarget_, t);
             }
         }

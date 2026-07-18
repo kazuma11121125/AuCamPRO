@@ -28,9 +28,17 @@ class NativeEngineBridge : AutoCloseable {
     // "that call touches freed memory".
     @Volatile private var closed = false
 
-    /** [preferredInputDeviceId] of 0 means "let the OS choose" (oboe::kUnspecified). */
-    fun start(preferredInputDeviceId: Int = kUnspecifiedDeviceId): String? =
-        nativeStart(handle, preferredInputDeviceId)
+    /** [preferredInputDeviceId] of 0 means "let the OS choose" (oboe::kUnspecified).
+     * [requestedSampleRateHz] drives the hi-res fallback ladder
+     * (docs/HIRES_AUDIO_DESIGN.md §3) — always succeeds at some rate (never fails purely
+     * because a hi-res rate wasn't available); call [actualSampleRateHz] afterward to see
+     * what was actually granted. */
+    fun start(preferredInputDeviceId: Int = kUnspecifiedDeviceId, requestedSampleRateHz: Int = kStandardSampleRateHz): String? =
+        nativeStart(handle, preferredInputDeviceId, requestedSampleRateHz)
+
+    /** The engine's actual current sample rate (after any hi-res fallback) — see [start].
+     * 0 once [closed]. */
+    fun actualSampleRateHz(): Int = if (closed) 0 else nativeGetActualSampleRate(handle)
 
     fun stop() = nativeStop(handle)
 
@@ -111,6 +119,7 @@ class NativeEngineBridge : AutoCloseable {
 
     private companion object {
         const val kUnspecifiedDeviceId = 0 // matches oboe::kUnspecified
+        const val kStandardSampleRateHz = 48_000 // matches OboeFullDuplexEngine::kStandardSampleRate
         const val SILENCE_DB = -100f // matches PeakRmsMeter.cpp's own kSilenceFloorDb
 
         init {
@@ -120,7 +129,8 @@ class NativeEngineBridge : AutoCloseable {
 
     private external fun nativeCreate(): Long
     private external fun nativeDestroy(handle: Long)
-    private external fun nativeStart(handle: Long, preferredInputDeviceId: Int): String?
+    private external fun nativeStart(handle: Long, preferredInputDeviceId: Int, requestedSampleRateHz: Int): String?
+    private external fun nativeGetActualSampleRate(handle: Long): Int
     private external fun nativeStop(handle: Long)
     private external fun nativeReopenInputStream(handle: Long, deviceId: Int): String?
     private external fun nativeInsertSilence(handle: Long, frameCount: Int)

@@ -31,18 +31,38 @@ public:
     OboeFullDuplexEngine();
     ~OboeFullDuplexEngine() override;
 
-    static constexpr int32_t kSampleRate = 48000;
+    static constexpr int32_t kStandardSampleRate = 48000;
+    // Hi-res ladder ceiling (docs/HIRES_AUDIO_DESIGN.md §2) — the ring buffer is sized for
+    // this regardless of the currently-active rate (see kRingBufferCapacityFrames) so a
+    // rate change never needs to resize/recreate it mid-session.
+    static constexpr int32_t kMaxSampleRate = 192000;
     static constexpr int32_t kChannelCount = 2;
     // ~10 seconds of stereo audio headroom between the RT producer and the Encoder-thread
-    // consumer; generous on purpose since an overrun here means lost audio, not just a
-    // dropped video frame.
-    static constexpr size_t kRingBufferCapacityFrames = kSampleRate * 10;
+    // consumer at the *maximum* supported rate; generous on purpose since an overrun here
+    // means lost audio, not just a dropped video frame. At kStandardSampleRate this is
+    // correspondingly more headroom (~40s), which is harmless (docs/HIRES_AUDIO_DESIGN.md
+    // §1's "ファイルサイズ非考慮" ruling extends to this ~15MB fixed allocation).
+    static constexpr size_t kRingBufferCapacityFrames = static_cast<size_t>(kMaxSampleRate) * 10;
 
     // UI/coroutine thread only. Opens and starts the input stream (and the output stream
-    // too, if monitoring was already requested). Implements the SharingMode::Exclusive ->
-    // Shared and InputPreset::Unprocessed -> VoiceRecognition fallback ladder from §4.2,
-    // logging every downgrade (never silent).
-    Result<void, std::string> start(int32_t preferredInputDeviceId);
+    // too, if monitoring was already requested) at [requestedSampleRateHz], implementing
+    // both the SharingMode::Exclusive -> Shared and InputPreset::Unprocessed ->
+    // VoiceRecognition fallback ladder from §4.2 AND (docs/HIRES_AUDIO_DESIGN.md §3) a
+    // sample-rate fallback ladder (192000 -> 96000 -> kStandardSampleRate, entering at
+    // whichever of those is <= [requestedSampleRateHz]) — kStandardSampleRate is always
+    // the last rung and is guaranteed to succeed on any device this app already supports,
+    // so this method never fails purely because a hi-res rate wasn't available; it only
+    // fails for the same device-level reasons the pre-hi-res code could already fail for.
+    // Every rate/SharingMode/InputPreset downgrade is logged — never silent. The actually-
+    // granted rate is queryable afterward via [sampleRateHz].
+    Result<void, std::string> start(int32_t preferredInputDeviceId,
+                                     int32_t requestedSampleRateHz = kStandardSampleRate);
+
+    // Any thread. The engine's actual current sample rate — what [start] most recently
+    // succeeded at, after any fallback. UI/coroutine callers use this (via JNI) to display
+    // what hi-res mode actually landed on rather than what was requested (same "never
+    // silently fake it" principle as AudioDeviceRouter's device-label reporting).
+    int32_t sampleRateHz() const { return sampleRateHz_; }
 
     // UI/coroutine thread only. Stops and closes both streams.
     void stop();
@@ -141,7 +161,15 @@ public:
     void onErrorAfterClose(oboe::AudioStream *stream, oboe::Result error) override;
 
 private:
-    Result<std::shared_ptr<oboe::AudioStream>, std::string> openInputStreamLocked(int32_t deviceId);
+    Result<std::shared_ptr<oboe::AudioStream>, std::string> openInputStreamLocked(int32_t deviceId,
+                                                                                     int32_t sampleRateHz);
+
+    // Runtime engine rate (docs/HIRES_AUDIO_DESIGN.md §4/§6.5) — only ever written from
+    // [start] (streamMutex_ held), after a stream has actually been granted this rate.
+    // highPassFilter_/eq_/meter_ are kept in sync with it via their own setSampleRate()
+    // calls in [start] (see that method) rather than being destroyed/reconstructed, so a
+    // rate change doesn't lose the user's HighPass/EQ settings.
+    int32_t sampleRateHz_ = kStandardSampleRate;
 
     InputGain inputGain_;
     HighPassFilter highPassFilter_;

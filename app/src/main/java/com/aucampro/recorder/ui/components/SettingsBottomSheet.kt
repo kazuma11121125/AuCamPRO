@@ -28,6 +28,7 @@ import com.aucampro.recorder.ui.theme.SurfaceDark
 import com.aucampro.recorder.ui.viewmodel.CameraControlViewModel
 import com.aucampro.recorder.ui.viewmodel.CameraUiState
 import com.aucampro.recorder.ui.viewmodel.FrameLineAspectRatio
+import com.aucampro.recorder.ui.viewmodel.RecordingUiState
 import com.aucampro.recorder.ui.viewmodel.StorageLocation
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -201,6 +202,57 @@ fun SettingsBottomSheet(
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 音声品質 (docs/HIRES_AUDIO_DESIGN.md §2/§5) — Standard changes nothing;
+            // the hi-res tiers request a higher engine capture rate and add a lossless WAV
+            // サイドカー alongside the existing 48kHz AAC/MP4 track (see AudioQuality's
+            // doc). Disabled while RECORDING — RecordingPipeline.setAudioQuality's own doc
+            // notes it's a no-op mid-take too, this is the primary UI-level guard for that
+            // (mirrors ViewModel.setAudioQuality's own recording-state check).
+            val isRecording = state.recordingState == RecordingUiState.Recording
+            Text(
+                text = "音声品質",
+                color = OnSurfaceSecondary,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            com.aucampro.recorder.audio.AudioQuality.entries.forEach { quality ->
+                val isSelected = state.settings.audioQuality == quality
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = !isRecording) { viewModel.setAudioQuality(quality) }
+                        .padding(vertical = 8.dp)
+                ) {
+                    RadioButton(
+                        selected = isSelected,
+                        onClick = null,
+                        enabled = !isRecording,
+                        colors = RadioButtonDefaults.colors(selectedColor = Amber)
+                    )
+                    Text(
+                        text = quality.label,
+                        color = if (isRecording) {
+                            OnSurfaceSecondary.copy(alpha = 0.5f)
+                        } else if (isSelected) {
+                            OnSurfacePrimary
+                        } else {
+                            OnSurfaceSecondary
+                        },
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+            }
+            Text(
+                text = "実際のフォーマット: ${state.audioFormatLabel}",
+                color = OnSurfaceSecondary,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
         }

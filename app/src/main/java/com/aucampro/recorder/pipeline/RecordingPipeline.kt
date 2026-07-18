@@ -14,6 +14,7 @@ import android.util.Log
 import android.view.Surface
 import androidx.annotation.RequiresPermission
 import com.aucampro.recorder.audio.AudioDeviceRouter
+import com.aucampro.recorder.audio.AudioQuality
 import com.aucampro.recorder.audio.NativeEngineBridge
 import com.aucampro.recorder.camera.CameraCapabilityInspector
 import com.aucampro.recorder.camera.CameraParams
@@ -22,6 +23,7 @@ import com.aucampro.recorder.camera.CaptureRangeClamper
 import com.aucampro.recorder.camera.ColorTemperatureConverter
 import com.aucampro.recorder.camera.ManualCaptureRequestFactory
 import com.aucampro.recorder.encoder.AudioEncoder
+import com.aucampro.recorder.encoder.HiResAudioSink
 import com.aucampro.recorder.encoder.VideoEncoder
 import com.aucampro.recorder.muxer.PtsClockDomain
 import com.aucampro.recorder.muxer.SegmentedMuxerController
@@ -269,6 +271,83 @@ class RecordingPipeline(private val context: Context) {
      * open apart from one that's genuinely in use). */
     var onAudioInputDeviceChanged: ((String) -> Unit)? = null
 
+    // User's Settings sheet audio-quality choice (docs/HIRES_AUDIO_DESIGN.md §2/§5) — Auto
+    // is not a concept here (unlike preferredInputKind): Standard is simply this engine's
+    // original, only-ever-shipped behavior. actualCaptureRateHz is the engine's real
+    // current rate (may be lower than audioQuality.sampleRateHz — see
+    // onAudioEngineStartedLocked's doc); AUDIO_SAMPLE_RATE_HZ (the AAC/MP4 track's fixed
+    // 48kHz target) never changes regardless of either.
+    private var audioQuality: AudioQuality = AudioQuality.Standard
+    private var actualCaptureRateHz: Int = AUDIO_SAMPLE_RATE_HZ
+
+    /** Fires with a human-readable format label (§5 "実確定フォーマットラベル") whenever
+     * [actualCaptureRateHz] changes — at [ensureAudioEngineStarted]/[setAudioQuality] time.
+     * Mirrors [onAudioInputDeviceChanged]'s "report what actually happened, not what was
+     * requested" principle. */
+    var onAudioFormatChanged: ((String) -> Unit)? = null
+
+    /** Settings sheet audio-quality picker. No-op while RECORDING (mirrors
+     * [selectVideoConfig]'s guard — changing the capture format mid-take is not supported,
+     * same reasoning: the UI is expected to disable this control during a take rather than
+     * relying on this check, but it's here too as a second line of defense). If the audio
+     * engine isn't running yet, just takes effect at the next [ensureAudioEngineStarted].
+     * If it IS running (preview or, mid-recording somehow, guarded above), restarts it at
+     * the new rate — see [restartAudioEngineForQualityChange]'s doc for why that's a full
+     * engine restart rather than the lighter device-reopen [setPreferredInputKind] uses. */
+    fun setAudioQuality(quality: AudioQuality) {
+        if (audioQuality == quality) return
+        if (pipelineState == PipelineState.RECORDING) return
+        audioQuality = quality
+        if (audioEngineActive) {
+            pipelineScope.launch { sessionMutex.withLock { restartAudioEngineForQualityChange() } }
+        }
+    }
+
+    /**
+     * Full audio-engine stop+start at [audioQuality]'s new rate (docs/HIRES_AUDIO_DESIGN.md
+     * §5) — heavier than [setPreferredInputKind]'s device reopen: a rate change means the
+     * ring buffer's producer format changes, so unlike a device hot-swap there is no
+     * meaningful "keep the stream running, just point it elsewhere" path. The meter briefly
+     * reads silence during the restart, which is an accepted trade-off (same doc).
+     * Native's own DSP objects preserve the user's HighPass/EQ settings across this restart
+     * (see OboeFullDuplexEngine::start's setSampleRate() calls) — nothing here needs to
+     * reapply them.
+     */
+    private suspend fun restartAudioEngineForQualityChange() {
+        if (!audioEngineActive) return
+        // nativeEngine.stop()/start() are both blocking native calls — offloaded per the
+        // same ANR-avoidance reasoning as onAudioDeviceSetChangedLocked's doc (this runs on
+        // pipelineScope's Main.immediate dispatcher). Only the native calls themselves run
+        // inside withContext; plain (non-@Volatile) fields are mutated after it returns,
+        // back on main — same invariant-preserving pattern as
+        // stopRecordingInternalLockedAsync's doc (see attemptAudioEngineStart's doc for why
+        // ensureAudioEngineStarted's logic is split in two specifically to make this
+        // possible without duplicating the device-fallback loop here).
+        // nativeEngine.stop() (below) closes the monitor output stream along with the
+        // input stream (OboeFullDuplexEngine::stop()) — same monitoring-off bookkeeping
+        // stopAudioEngineIfActive() does, replicated here since this path calls
+        // nativeEngine.stop() directly rather than through that function (see this
+        // method's own doc for why).
+        val wasMonitoring = monitoringActive
+        val requestedRateHz = audioQuality.sampleRateHz
+        val outcome = withContext(Dispatchers.IO) {
+            nativeEngine.stop()
+            attemptAudioEngineStart(requestedRateHz)
+        }
+        if (wasMonitoring) {
+            monitoringActive = false
+            notifyMonitoringChanged(false)
+        }
+        if (outcome.error != null) {
+            audioEngineActive = false
+            activeInputDeviceId = 0
+            actualCaptureRateHz = AUDIO_SAMPLE_RATE_HZ
+            Log.e(TAG, "Audio engine failed to restart for quality change to $audioQuality: ${outcome.error}")
+            return
+        }
+        applyAudioEngineStartOutcomeLocked(outcome)
+    }
+
     // Whether live monitoring is actually running right now — the single source of truth
     // [onMonitoringEnabledChanged] reports from, since a toggle-on request can be rejected
     // (see setMonitoringEnabled's doc) or auto-reverted on hot-swap (onAudioDeviceSetChangedLocked).
@@ -305,26 +384,59 @@ class RecordingPipeline(private val context: Context) {
      * already-active preview). Tries each candidate device in priority order, falling
      * back to the next on failure, then finally to "let the OS choose" — see
      * AudioDeviceRouter's doc for why this loop (not the native layer) is what prevents a
-     * USB interface that fails to open from regressing a previously-working built-in mic. */
+     * USB interface that fails to open from regressing a previously-working built-in mic.
+     *
+     * Requests [audioQuality]'s sample rate on every attempt (docs/HIRES_AUDIO_DESIGN.md
+     * §3) — [NativeEngineBridge.start]'s own fallback ladder inside each of these attempts
+     * means a hi-res request never *itself* causes this loop to fail; [actualCaptureRateHz]
+     * is read back afterward and may be lower than requested. */
     private fun ensureAudioEngineStarted(): String? {
         if (audioEngineActive) return null
+        val outcome = attemptAudioEngineStart(audioQuality.sampleRateHz)
+        applyAudioEngineStartOutcomeLocked(outcome)
+        return outcome.error
+    }
+
+    /** The blocking (native-call-only, no field mutation) half of starting the audio
+     * engine — see [restartAudioEngineForQualityChange]'s doc for why this is split out
+     * from [ensureAudioEngineStarted] rather than inlined there: it lets that caller run
+     * the blocking part on `Dispatchers.IO` while still only mutating this class's plain
+     * `var` fields back on the caller's own dispatcher, same invariant-preserving pattern
+     * as [stopRecordingInternalLockedAsync]'s doc. Tries each candidate device in priority
+     * order, falling back to "let the OS choose" — see AudioDeviceRouter's doc for why this
+     * loop (not the native layer) is what prevents a USB interface that fails to open from
+     * regressing a previously-working built-in mic. */
+    private fun attemptAudioEngineStart(requestedSampleRateHz: Int): AudioEngineStartOutcome {
         for (device in audioDeviceRouter.candidateInputDevices(preferredInputKind)) {
-            val error = nativeEngine.start(device.id)
-            if (error == null) {
-                audioEngineActive = true
-                activeInputDeviceId = device.id
-                notifyInputDeviceChanged(device)
-                return null
-            }
+            val error = nativeEngine.start(device.id, requestedSampleRateHz)
+            if (error == null) return AudioEngineStartOutcome(device, null)
             Log.w(TAG, "Audio engine failed to start on ${audioDeviceRouter.labelFor(device)} (id=${device.id}): $error")
         }
-        val fallbackError = nativeEngine.start()
-        if (fallbackError == null) {
-            audioEngineActive = true
-            activeInputDeviceId = 0
-            notifyInputDeviceChanged(null)
-        }
-        return fallbackError
+        val fallbackError = nativeEngine.start(requestedSampleRateHz = requestedSampleRateHz)
+        return AudioEngineStartOutcome(null, fallbackError)
+    }
+
+    private data class AudioEngineStartOutcome(val device: android.media.AudioDeviceInfo?, val error: String?)
+
+    /** Field-mutation half of [attemptAudioEngineStart] — caller's responsibility to run
+     * this back on its own confinement dispatcher (see that method's doc). No-op (besides
+     * being safe to call) if [outcome] carries an error: [audioEngineActive] stays however
+     * it already was. */
+    private fun applyAudioEngineStartOutcomeLocked(outcome: AudioEngineStartOutcome) {
+        if (outcome.error != null) return
+        audioEngineActive = true
+        activeInputDeviceId = outcome.device?.id ?: 0
+        onAudioEngineStartedLocked()
+        notifyInputDeviceChanged(outcome.device)
+    }
+
+    /** Reads back the engine's actually-granted rate (docs/HIRES_AUDIO_DESIGN.md §3's
+     * "黙って偽装しない" principle) right after a successful [NativeEngineBridge.start] and
+     * notifies the UI. Must run before any [AudioEncoder]/[HiResAudioSink] is constructed
+     * for this session, since they read [actualCaptureRateHz] at construction time. */
+    private fun onAudioEngineStartedLocked() {
+        actualCaptureRateHz = nativeEngine.actualSampleRateHz().takeIf { it > 0 } ?: AUDIO_SAMPLE_RATE_HZ
+        notifyAudioFormatChanged()
     }
 
     private fun stopAudioEngineIfActive() {
@@ -332,6 +444,7 @@ class RecordingPipeline(private val context: Context) {
             nativeEngine.stop()
             audioEngineActive = false
             activeInputDeviceId = 0
+            actualCaptureRateHz = AUDIO_SAMPLE_RATE_HZ
             if (monitoringActive) {
                 monitoringActive = false
                 notifyMonitoringChanged(false)
@@ -342,6 +455,17 @@ class RecordingPipeline(private val context: Context) {
     private fun notifyInputDeviceChanged(device: android.media.AudioDeviceInfo?) {
         val label = audioDeviceRouter.labelFor(device)
         Handler(Looper.getMainLooper()).post { onAudioInputDeviceChanged?.invoke(label) }
+    }
+
+    /** §5 "実確定フォーマットラベル" (docs/HIRES_AUDIO_DESIGN.md) — human-readable summary
+     * of what [actualCaptureRateHz] actually is right now, for the AUDIO panel. */
+    private fun notifyAudioFormatChanged() {
+        val label = when {
+            actualCaptureRateHz != AUDIO_SAMPLE_RATE_HZ -> "${actualCaptureRateHz / 1000}kHz/32bit Float"
+            audioQuality != AudioQuality.Standard -> "48kHz (ハイレゾ非対応デバイス)"
+            else -> "48kHz"
+        }
+        Handler(Looper.getMainLooper()).post { onAudioFormatChanged?.invoke(label) }
     }
 
     /**
@@ -410,7 +534,10 @@ class RecordingPipeline(private val context: Context) {
         }
 
         val gapNanos = System.nanoTime() - gapStartNanos
-        val gapFrames = (gapNanos * AUDIO_SAMPLE_RATE_HZ / 1_000_000_000L).toInt()
+        // Engine-rate frames (docs/HIRES_AUDIO_DESIGN.md §4/§6.5): insertSilence() pushes
+        // directly into the native ring buffer, which is always in actualCaptureRateHz
+        // frames regardless of the AAC track's fixed AUDIO_SAMPLE_RATE_HZ target.
+        val gapFrames = (gapNanos * actualCaptureRateHz / 1_000_000_000L).toInt()
         withContext(Dispatchers.IO) { nativeEngine.insertSilence(gapFrames) }
         activeInputDeviceId = openedDevice.id
         notifyInputDeviceChanged(openedDevice)
@@ -487,6 +614,12 @@ class RecordingPipeline(private val context: Context) {
     private var muxerController: SegmentedMuxerController? = null
     private var ptsClockDomain: PtsClockDomain? = null
     private var currentOutputDir: File? = null
+
+    // Hi-res WAV サイドカー (docs/HIRES_AUDIO_DESIGN.md) — null unless this take actually
+    // landed on a hi-res capture rate (see startRecording's construction site). Held here
+    // (not just inside AudioEncoder) so emergencyFinalizeCurrentSegment() can reach it,
+    // mirroring muxerController's own reason for being a top-level field.
+    private var hiResAudioSink: HiResAudioSink? = null
 
     // ──────────────────────────────────────────────────────────────────────────────
     // Public methods
@@ -824,6 +957,26 @@ class RecordingPipeline(private val context: Context) {
             val engineError = ensureAudioEngineStarted()
             if (engineError != null) error("Audio engine failed to start: $engineError")
 
+            // Hi-res WAV サイドカー (docs/HIRES_AUDIO_DESIGN.md §1/§6.2/§6.4) — only when
+            // the engine actually landed on a rate above the AAC track's fixed target (a
+            // hi-res *request* that fell back to 48kHz gets no sidecar, matching
+            // notifyAudioFormatChanged's "48kHz (ハイレゾ非対応デバイス)" label: there is
+            // nothing lossless-and-higher-rate to capture in that case). Segmented the same
+            // way as the MP4 (same take timestamp, same segmentDurationMinutes).
+            val hiResSink = if (actualCaptureRateHz > AUDIO_SAMPLE_RATE_HZ) {
+                HiResAudioSink(
+                    outputPathForSegment = { index ->
+                        File(outputDir, "${APP_NAME_TAG}_${takeTimestampMs}_segment_$index.wav").absolutePath
+                    },
+                    sampleRateHz = actualCaptureRateHz,
+                    channelCount = AUDIO_CHANNEL_COUNT,
+                    segmentDurationUs = segmentDurationMinutes * 60 * 1_000_000L,
+                )
+            } else {
+                null
+            }
+            hiResAudioSink = hiResSink
+
             val audio = AudioEncoder(
                 sampleRateHz = AUDIO_SAMPLE_RATE_HZ,
                 channelCount = AUDIO_CHANNEL_COUNT,
@@ -840,6 +993,8 @@ class RecordingPipeline(private val context: Context) {
                     override fun onError(exception: Exception) =
                         onEncoderError("AudioEncoder", exception, onEvent)
                 },
+                captureSampleRateHz = actualCaptureRateHz,
+                hiResSink = hiResSink,
             )
             audioEncoder = audio
 
@@ -1062,6 +1217,16 @@ class RecordingPipeline(private val context: Context) {
         } catch (e: Throwable) {
             Log.e(TAG, "emergencyFinalizeCurrentSegment failed", e)
         }
+        try {
+            // Same best-effort acceptance as the muxer above (docs/HIRES_AUDIO_DESIGN.md
+            // §6.4) — may race AudioEncoder's own drain thread mid-write() if that thread
+            // is still alive when the crash handler runs; WavFileWriter.close()'s
+            // back-patch is idempotent so this is safe to call regardless.
+            hiResAudioSink?.close()
+            Log.w(TAG, "emergencyFinalizeCurrentSegment: hi-res WAV finalized")
+        } catch (e: Throwable) {
+            Log.e(TAG, "emergencyFinalizeCurrentSegment (WAV) failed", e)
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────────
@@ -1090,13 +1255,14 @@ class RecordingPipeline(private val context: Context) {
             encoder.awaitEndOfStream()
             encoder.stop()
         }
-        audioEncoder?.stop()
+        audioEncoder?.stop()  // also closes hiResAudioSink internally — see AudioEncoder's drain-thread finally block
         muxerController?.stop()
 
         ptsClockDomain = null
         videoEncoder = null
         audioEncoder = null
         muxerController = null
+        hiResAudioSink = null
         pipelineState = PipelineState.IDLE
 
         // Preview restart itself is *not* done here despite the restartPreview parameter:
@@ -1105,7 +1271,10 @@ class RecordingPipeline(private val context: Context) {
         // stopRecording() (true) relies on the ViewModel calling startPreview() again after
         // it returns; stopAll() (false) tears the pipeline down instead. See stopRecording's
         // doc.
-        currentOutputDir?.let { exportToPublicMoviesIfRequested(it) }
+        currentOutputDir?.let {
+            exportToPublicMoviesIfRequested(it)
+            exportWavIfRequested(it)
+        }
         currentOutputDir = null
     }
 
@@ -1155,15 +1324,19 @@ class RecordingPipeline(private val context: Context) {
                 encoder.awaitEndOfStream()
                 encoder.stop()
             }
-            audio?.stop()
+            audio?.stop()  // also closes hiResAudioSink internally — see AudioEncoder's drain-thread finally block
             muxer?.stop()
-            dir?.let { exportToPublicMoviesIfRequested(it) }
+            dir?.let {
+                exportToPublicMoviesIfRequested(it)
+                exportWavIfRequested(it)
+            }
         }
 
         ptsClockDomain = null
         videoEncoder = null
         audioEncoder = null
         muxerController = null
+        hiResAudioSink = null
         pipelineState = PipelineState.IDLE
         currentOutputDir = null
     }
@@ -1215,6 +1388,47 @@ class RecordingPipeline(private val context: Context) {
         // user's perspective even though it's several files on disk.
         lastExportedUri?.let { uri ->
             Handler(Looper.getMainLooper()).post { onMediaCaptured?.invoke(uri, true) }
+        }
+    }
+
+    /**
+     * Hi-res WAV counterpart of [exportToPublicMoviesIfRequested] (docs/HIRES_AUDIO_DESIGN.md
+     * §6.4) — exports to `Music/AuCamPRO` via `MediaStore.Audio` rather than
+     * `MediaStore.Video`/`Movies`, since a `.wav` isn't gallery content. Deliberately does
+     * NOT touch [onMediaCaptured]/the gallery thumbnail — the MP4 segment already stands in
+     * for "this take" there (see that method's own doc); the WAV is a supplementary
+     * lossless master, not a second "capture" from the user's perspective. Same threading
+     * contract as [exportToPublicMoviesIfRequested] (callers keep this off the main
+     * thread).
+     */
+    private fun exportWavIfRequested(outputDir: File) {
+        if (storageLocation != StorageLocation.PublicMovies) return
+        val segmentFiles = outputDir.listFiles { f -> f.extension == "wav" }?.sortedBy { it.name }
+        if (segmentFiles.isNullOrEmpty()) return
+
+        val resolver = context.contentResolver
+        for (file in segmentFiles) {
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.Audio.Media.DISPLAY_NAME, file.name)
+                    put(MediaStore.Audio.Media.MIME_TYPE, "audio/wav")
+                    put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/AuCamPRO")
+                    put(MediaStore.Audio.Media.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values)
+                if (uri == null) {
+                    Log.e(TAG, "MediaStore insert failed for ${file.name}")
+                    continue
+                }
+                resolver.openOutputStream(uri)?.use { out ->
+                    file.inputStream().use { it.copyTo(out) }
+                }
+                resolver.update(uri, ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) }, null, null)
+                file.delete()
+                Log.i(TAG, "Exported ${file.name} to Music/AuCamPRO")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to export ${file.name} to MediaStore Music", e)
+            }
         }
     }
 

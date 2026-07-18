@@ -8,10 +8,16 @@ namespace {
 constexpr float kSilenceFloorDb = -100.0f;
 }
 
-PeakRmsMeter::PeakRmsMeter(double sampleRateHz, float releaseSeconds, float rmsWindowSeconds) {
+PeakRmsMeter::PeakRmsMeter(double sampleRateHz, float releaseSeconds, float rmsWindowSeconds)
+    : releaseSeconds_(releaseSeconds), rmsWindowSeconds_(rmsWindowSeconds) {
     // One-pole coefficient: coeff = exp(-1 / (tau_seconds * sampleRate)).
-    peakReleaseCoeffPerSample_ = std::exp(-1.0f / (releaseSeconds * static_cast<float>(sampleRateHz)));
-    rmsSmoothingCoeffPerSample_ = std::exp(-1.0f / (rmsWindowSeconds * static_cast<float>(sampleRateHz)));
+    peakReleaseCoeffPerSample_ = std::exp(-1.0f / (releaseSeconds_ * static_cast<float>(sampleRateHz)));
+    rmsSmoothingCoeffPerSample_ = std::exp(-1.0f / (rmsWindowSeconds_ * static_cast<float>(sampleRateHz)));
+}
+
+void PeakRmsMeter::setSampleRate(double sampleRateHz) {
+    peakReleaseCoeffPerSample_ = std::exp(-1.0f / (releaseSeconds_ * static_cast<float>(sampleRateHz)));
+    rmsSmoothingCoeffPerSample_ = std::exp(-1.0f / (rmsWindowSeconds_ * static_cast<float>(sampleRateHz)));
 }
 
 float PeakRmsMeter::linearToDb(float linear) {

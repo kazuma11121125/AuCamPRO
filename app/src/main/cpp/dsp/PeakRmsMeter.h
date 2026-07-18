@@ -28,6 +28,13 @@ public:
     // rmsWindowSeconds controls the one-pole RMS smoothing time constant.
     PeakRmsMeter(double sampleRateHz, float releaseSeconds = 0.3f, float rmsWindowSeconds = 0.3f);
 
+    // UI thread only, engine-reconfigure context (docs/HIRES_AUDIO_DESIGN.md §4/§6.5) —
+    // NOT a live per-sample-callback operation. Recomputes the ballistics coefficients for
+    // a new sample rate, keeping the same release/RMS-window time constants this meter was
+    // constructed with (there is no UI-facing control for those, so nothing to preserve
+    // beyond the rate-dependent math itself).
+    void setSampleRate(double sampleRateHz);
+
     // Audio callback thread only. channelCount must be <= kMaxChannels.
     void process(const float *interleaved, size_t frameCount, int channelCount);
 
@@ -39,6 +46,8 @@ public:
 private:
     static float linearToDb(float linear);
 
+    float releaseSeconds_;
+    float rmsWindowSeconds_;
     float peakReleaseCoeffPerSample_;
     float rmsSmoothingCoeffPerSample_;
 
