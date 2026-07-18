@@ -95,7 +95,18 @@ class VideoEncoder(
                     return
                 }
 
-                val normalizedPtsUs = ptsClockDomain.normalizeVideoPtsUs(info.presentationTimeUs * 1000L)
+                val presentationTimeNanos = info.presentationTimeUs * 1000L
+                // 実機で発見・修正 (2026-07-18, PtsClockDomain.isStarted's doc): anchor the
+                // recording epoch to this, the first real frame this encoder ever produces,
+                // rather than the caller anchoring it up front at "recording requested"
+                // time — a full camera-session reconfigure measured ~1.3-1.6s on real
+                // hardware between those two moments, and audio starts flowing almost
+                // immediately, so anchoring early gave every take that much audio-only lead
+                // with no corresponding video.
+                if (!ptsClockDomain.isStarted()) {
+                    ptsClockDomain.start(presentationTimeNanos)
+                }
+                val normalizedPtsUs = ptsClockDomain.normalizeVideoPtsUs(presentationTimeNanos)
                 if (normalizedPtsUs == null) {
                     // Dropped: non-monotonic (§4.3's guard). The Muxer's
                     // pending-queue-before-start behavior (§4.4) is what's expected to

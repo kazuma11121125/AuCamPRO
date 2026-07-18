@@ -51,6 +51,7 @@ class CameraSessionController(private val cameraManager: CameraManager) {
 
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
+    private var openCameraId: String? = null
 
     // Preserved so updateCaptureParams() can rebuild the request without caller re-supplying them.
     private var activeSurfaces: List<Surface> = emptyList()
@@ -98,6 +99,7 @@ class CameraSessionController(private val cameraManager: CameraManager) {
 
         val cameraDevice = openCamera(cameraId)
         device = cameraDevice
+        openCameraId = cameraId
 
         val captureSession = createSession(cameraDevice, outputSurfaces)
         session = captureSession
@@ -108,6 +110,77 @@ class CameraSessionController(private val cameraManager: CameraManager) {
 
         captureSession.setRepeatingRequest(
             buildRequest(cameraDevice, requestFactory, params),
+            makeCaptureCallback(),
+            callbackHandler,
+        )
+    }
+
+    /**
+     * Rebuilds the `CameraCaptureSession`'s output surface set **without** closing and
+     * reopening the underlying `CameraDevice` when [cameraId] matches the device this
+     * controller already has open — falls back to the full [stop]+[startRepeating] path
+     * otherwise (no device open yet, or a different `cameraId` — e.g. a lens switch on a
+     * multi-camera device, which has no in-place equivalent).
+     *
+     * **実機計測 (2026-07-18)**: at the recording-start call site, the previous
+     * `stop()`+`startRepeating()` pair cost ~1000ms end-to-end (breakdown:
+     * `abortCaptures`+`session.close`+`device.close` ~220ms, `openCamera` ~130ms,
+     * `createCaptureSession` ~430-450ms, `setRepeatingRequest` ~200ms). Device-reuse only
+     * removes the `device.close`+`openCamera` portion (~250-320ms) — `createCaptureSession`
+     * dominates and costs essentially the same regardless of whether the device was freshly
+     * reopened, since it's the HAL's own session-configuration handshake, not a
+     * device-open cost. This is still worth doing for two reasons: (1) it's a real,
+     * measured ~30% latency cut with no correctness downside — Camera2 documents that
+     * `createCaptureSession` on an already-open device implicitly supersedes/aborts the
+     * previous session, so an explicit `session.close()` beforehand is unnecessary (and
+     * would only add back a synchronous state-transition wait this method is specifically
+     * avoiding); (2) keeping the `CameraDevice` itself open means its 3A (AF/AE/AWB)
+     * convergence state is never torn down and rebuilt from scratch, which is the
+     * suspected mechanism behind a separately-reported "AF hunts again at recording
+     * start" symptom — unconfirmed without dedicated real-device AF-state testing, but
+     * plausible and costs nothing to get for free alongside the latency win.
+     *
+     * The remaining ~650ms (mostly `createCaptureSession`) is NOT eliminated by this
+     * method — see [com.aucampro.recorder.muxer.PtsClockDomain.isStarted]'s doc for the
+     * fix that makes the *recorded file* correct regardless of how long this call takes:
+     * anchoring the A/V epoch to the first real video frame rather than to when this
+     * method was invoked.
+     */
+    @RequiresPermission(Manifest.permission.CAMERA)
+    suspend fun reconfigureSession(
+        cameraId: String,
+        outputSurfaces: List<Surface>,
+        requestFactory: ManualCaptureRequestFactory,
+        params: CameraParams,
+        repeatingTargets: List<Surface> = outputSurfaces,
+    ) {
+        require(outputSurfaces.isNotEmpty()) { "At least one output surface required" }
+
+        val existingDevice = device
+        if (existingDevice == null || openCameraId != cameraId) {
+            stop()
+            startRepeating(cameraId, outputSurfaces, requestFactory, params, repeatingTargets)
+            return
+        }
+
+        try {
+            session?.abortCaptures()
+        } catch (e: Exception) {
+            Log.w(TAG, "reconfigureSession: abortCaptures failed, proceeding anyway", e)
+        }
+
+        // Deliberately no session?.close() here — see this method's doc for why creating
+        // the new session directly on the still-open device is both faster and documented
+        // as safe (the new session supersedes the old one).
+        val captureSession = createSession(existingDevice, outputSurfaces)
+        session = captureSession
+
+        activeSurfaces = repeatingTargets
+        activeRequestFactory = requestFactory
+        activeParams = params
+
+        captureSession.setRepeatingRequest(
+            buildRequest(existingDevice, requestFactory, params),
             makeCaptureCallback(),
             callbackHandler,
         )
@@ -212,6 +285,7 @@ class CameraSessionController(private val cameraManager: CameraManager) {
         device?.close()
         session = null
         device = null
+        openCameraId = null
         activeSurfaces = emptyList()
         activeRequestFactory = null
         activeParams = null

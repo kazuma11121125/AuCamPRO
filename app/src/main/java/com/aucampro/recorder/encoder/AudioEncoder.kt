@@ -171,18 +171,33 @@ class AudioEncoder(
      * since this runs on the caller's dispatcher, which for
      * [com.aucampro.recorder.pipeline.RecordingPipeline]'s current callers is the Main
      * thread). Fixed by moving `codec.stop()`/`release()` into [drainLoop]'s own `finally`
-     * so only the thread that was still using the codec ever calls those on it. If
-     * [drainThread] is still alive after the timeout, this simply returns without touching
-     * the codec — it stays alive until the drain thread's own `finally` runs, which is a
-     * resource-lifetime delay, not a crash.
+     * so only the thread that was still using the codec ever calls those on it.
+     *
+     * **実機で発見 (2026-07-18)**: [drainThread] is still alive after the timeout, this used
+     * to just log and return, leaving the codec cleanup "a resource-lifetime delay, not a
+     * crash" — true for the codec, but [RecordingPipeline]'s stop sequence calls
+     * [exportWavIfRequested] right after this returns, which copies [hiResSink]'s `.wav`
+     * file out via `MediaStore`. That file's RIFF/`fact`/`data` size fields are only
+     * back-patched in [HiResAudioSink.close] → [WavFileWriter.close], which runs in
+     * [drainLoop]'s `finally` — i.e. after this thread was still draining. Returning early
+     * let the export race that back-patch, confirmed on-device via a captured `.wav` whose
+     * header still had all-zero RIFF/data sizes (players see zero-length audio — the
+     * reported 「WAVファイルの破損」) despite the PCM data itself being intact. Since both of
+     * this method's callers already run it off the main thread (`RecordingPipeline`'s
+     * `Dispatchers.IO`-dispatched stop path, or its teardown path which this class's own
+     * stop-sequence design no longer needs to race for main-thread safety — see above).
+     * a bounded-but-generous wait can't fully close the gap on a slow enough device, so we
+     * wait unconditionally: [drainThread]'s own loop is bounded (drains the ring buffer,
+     * sends EOS, waits for the ack, then closes) and always terminates on its own.
      */
     fun stop() {
         running.set(false)
         drainThread?.join(DRAIN_THREAD_JOIN_TIMEOUT_MS)
         if (drainThread?.isAlive == true) {
             Log.w(TAG, "AudioEncoderDrain still running after " +
-                "${DRAIN_THREAD_JOIN_TIMEOUT_MS}ms; leaving codec.stop()/release() to it " +
-                "instead of racing it from here")
+                "${DRAIN_THREAD_JOIN_TIMEOUT_MS}ms; waiting for it to fully finish " +
+                "(callers depend on hiResSink's file being closed) rather than returning early")
+            drainThread?.join()
         }
     }
 

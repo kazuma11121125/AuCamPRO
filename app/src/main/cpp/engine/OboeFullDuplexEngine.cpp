@@ -138,6 +138,34 @@ Result<void, std::string> OboeFullDuplexEngine::start(int32_t preferredInputDevi
                                                           int32_t requestedSampleRateHz) {
     std::lock_guard<std::mutex> lock(streamMutex_);
 
+    // 実機で発見 (2026-07-18, monitor-noise investigation): this used to assign straight
+    // into inputStream_/leave outputStream_ untouched, silently trusting that callers never
+    // call [start] again while a stream from a previous call is still live. That assumption
+    // is false in practice — confirmed on-device via logcat, this app's own init sequence
+    // opens the input stream once at the default 48kHz, opens the monitor output stream
+    // (if monitoring was restored on from saved settings) against *that* rate, and only
+    // *then* re-calls [start] at the user's actual saved Hi-Res rate, with no [stop] in
+    // between. The old inputStream_ leaked (never closed — its callback could in theory
+    // still fire concurrently with the new stream's), and the monitor output stream kept
+    // running at the stale rate for the rest of the session — onAudioReady()'s passthrough
+    // write() always assumes numFrames is tagged at the *current* sampleRateHz_, so this is
+    // exactly what turned into the reported "モニター音声がノイズだらけ→その後無音"
+    // (garbled audio from the rate mismatch, then silence once the output stream's internal
+    // buffer stayed permanently backed up). Closing both unconditionally here — whatever
+    // rate this call ends up granting, neither stale stream may survive it.
+    if (inputStream_) {
+        inputStream_->requestStop();
+        inputStream_->close();
+        inputStream_.reset();
+    }
+    if (outputStream_) {
+        outputStreamRaw_.store(nullptr, std::memory_order_release);
+        outputStream_->requestStop();
+        outputStream_->close();
+        outputStream_.reset();
+        monitoringEnabled_.store(false, std::memory_order_relaxed);
+    }
+
     // Rate fallback ladder (docs/HIRES_AUDIO_DESIGN.md §3): descend from
     // requestedSampleRateHz through the standard rungs, skipping any rung above the
     // request. kStandardSampleRate is always included and tried last, so this always has
@@ -292,12 +320,39 @@ Result<void, std::string> OboeFullDuplexEngine::setMonitoringEnabled(bool enable
         return Result<void, std::string>::Err(std::string("monitor output openStream failed: ") +
                                                 oboe::convertToText(openResult));
     }
+
+    // 実機で発見 (2026-07-18): unlike openInputStreamLocked, this never verified what
+    // Oboe/AAudio actually granted vs. what was requested (sampleRateHz_) — the same
+    // "the OS may silently grant a different config even on success" risk this header's
+    // own doc already calls out for a hi-res rate ("if this stream opened at a stale
+    // 48kHz [...] monitor passthrough would play back at roughly 2x speed/pitch"), just
+    // never actually guarded against. onAudioReady()'s passthrough write() below always
+    // assumes the output stream's rate equals sampleRateHz_ (it just forwards each
+    // callback's numFrames as-is) — a silent mismatch is exactly what turns into the
+    // reported "モニター音声がノイズだらけ" at hi-res rates. Fail loudly instead, same as
+    // the input path: [RecordingPipeline.setMonitoringEnabled] already treats a non-null
+    // error here as "leave monitoring off and snap the UI toggle back."
+    if (stream->getChannelCount() != kChannelCount || stream->getSampleRate() != sampleRateHz_) {
+        AUCAMPRO_LOGE("Monitor output stream opened with unexpected config: channels=%d rate=%d (expected %d/%d)",
+                        stream->getChannelCount(), stream->getSampleRate(), kChannelCount, sampleRateHz_);
+        stream->close();
+        return Result<void, std::string>::Err(
+            "Monitor output stream channel/sample-rate did not match the input engine's current rate");
+    }
+
     const oboe::Result startResult = stream->requestStart();
     if (startResult != oboe::Result::OK) {
         stream->close();
         return Result<void, std::string>::Err(std::string("monitor output requestStart failed: ") +
                                                 oboe::convertToText(startResult));
     }
+
+    // Diagnostic (2026-07-18, monitor-noise investigation): the success path used to log
+    // nothing at all, making "monitoring is silently on and working" indistinguishable in
+    // logcat from "the toggle never actually reached this code." Cheap and permanent, same
+    // spirit as openInputStreamLocked's analogous AUCAMPRO_LOGI.
+    AUCAMPRO_LOGI("Monitor output stream opened: deviceId=%d channelCount=%d sampleRate=%d",
+                    stream->getDeviceId(), stream->getChannelCount(), stream->getSampleRate());
 
     outputStream_ = stream;
     // Published last, after the shared_ptr member and the stream is fully started, so

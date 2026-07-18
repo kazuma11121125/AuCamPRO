@@ -127,14 +127,15 @@ class RecordingPipeline(private val context: Context) {
     private val orientationTracker = com.aucampro.recorder.utils.DeviceOrientationTracker(context).apply { start() }
 
     /**
-     * Guards every `sessionController.stop()` + `startRepeating()` pair (session
-     * open/close/reconfigure). Without this, e.g. rapid screen lock/unlock can fire
-     * overlapping [startPreview]/[detachPreviewSurface] calls whose suspend points
-     * (camera open, session configure) interleave — `CameraSessionController.stop()`
-     * nulls out `device`/`session` fields synchronously, so a second call's `stop()`
-     * landing between a first call's `openCamera()` and `createSession()` can corrupt
-     * that shared state. Not reentrant — callers must not call a `sessionMutex`-locked
-     * function from inside another one's locked block (see the `*Locked` helpers below).
+     * Guards every `sessionController.stop()` + `startRepeating()` pair, and every
+     * `sessionController.reconfigureSession()` call (session open/close/reconfigure).
+     * Without this, e.g. rapid screen lock/unlock can fire overlapping
+     * [startPreview]/[detachPreviewSurface] calls whose suspend points (camera open,
+     * session configure) interleave — `CameraSessionController`'s internal `device`/
+     * `session` fields are mutated synchronously by these calls, so a second call landing
+     * mid-suspend inside a first call's `openCamera()`/`createSession()` can corrupt that
+     * shared state. Not reentrant — callers must not call a `sessionMutex`-locked function
+     * from inside another one's locked block (see the `*Locked` helpers below).
      */
     private val sessionMutex = Mutex()
 
@@ -421,13 +422,27 @@ class RecordingPipeline(private val context: Context) {
     /** Field-mutation half of [attemptAudioEngineStart] — caller's responsibility to run
      * this back on its own confinement dispatcher (see that method's doc). No-op (besides
      * being safe to call) if [outcome] carries an error: [audioEngineActive] stays however
-     * it already was. */
+     * it already was.
+     *
+     * **実機で発見 (2026-07-18, monitor-noise investigation)**: `OboeFullDuplexEngine::start`
+     * now unconditionally closes any already-open monitor output stream (see its doc) —
+     * confirmed on-device as the fix for a real race where [setMonitoringEnabled] could
+     * land between a concurrent [nativeEngine].stop()/start() pair (e.g. both firing from
+     * `CameraControlViewModel`'s saved-settings restore at once) and open the monitor
+     * stream at a rate the engine was about to change out from under it — the native side
+     * now guards against that, but [monitoringActive] (this class's own source of truth
+     * for the UI toggle) must mirror it, or the switch can show ON while the underlying
+     * stream has already been silently torn down. */
     private fun applyAudioEngineStartOutcomeLocked(outcome: AudioEngineStartOutcome) {
         if (outcome.error != null) return
         audioEngineActive = true
         activeInputDeviceId = outcome.device?.id ?: 0
         onAudioEngineStartedLocked()
         notifyInputDeviceChanged(outcome.device)
+        if (monitoringActive) {
+            monitoringActive = false
+            notifyMonitoringChanged(false)
+        }
     }
 
     /** Reads back the engine's actually-granted rate (docs/HIRES_AUDIO_DESIGN.md §3's
@@ -871,8 +886,11 @@ class RecordingPipeline(private val context: Context) {
      * Starts the full encode/mux pipeline. Must be in PREVIEWING state.
      *
      * Session is reconfigured to add the encoder's InputSurface alongside [previewSurface],
-     * introducing a brief (~100-200ms) camera freeze during session recreation — acceptable
-     * for a recording-start event that the user has explicitly triggered.
+     * introducing a brief camera freeze during session recreation (~650-1000ms on real
+     * hardware, mostly HAL-side session configuration — see
+     * CameraSessionController.reconfigureSession's doc) — acceptable for a recording-start
+     * event that the user has explicitly triggered. The recorded file's A/V alignment does
+     * NOT depend on this being fast: see PtsClockDomain.isStarted's doc for why.
      *
      * On success emits [Event.Started]. On any failure emits [Event.Failed] and cleans up.
      */
@@ -899,9 +917,13 @@ class RecordingPipeline(private val context: Context) {
         try {
             recordingErrorHandled.set(false)
 
+            // 実機で発見・修正 (2026-07-18, PtsClockDomain.isStarted's doc): epoch is no
+            // longer anchored here at request-time — VideoEncoder anchors it itself to the
+            // first real frame it produces, since the camera-session reconfigure below can
+            // take ~1.3-1.6s on real hardware and audio starts flowing almost immediately,
+            // which used to bake that gap into every take as an audio-ahead-of-video offset.
             val pts = PtsClockDomain()
             ptsClockDomain = pts
-            pts.start()
 
             // Prefer the user's Settings selection (selectVideoConfig()) when one is set and
             // still valid for this device; otherwise fall back to the default picked at
@@ -912,9 +934,13 @@ class RecordingPipeline(private val context: Context) {
             } ?: caps.videoConfig
 
             val takeTimestampMs = System.currentTimeMillis()
+            val formatter = java.text.SimpleDateFormat("yyyyMMddHHmm", java.util.Locale.getDefault()).apply {
+                timeZone = java.util.TimeZone.getDefault()
+            }
+            val takeTimestampStr = formatter.format(java.util.Date(takeTimestampMs))
             val outputDir = File(
                 context.getExternalFilesDir(null),
-                "recordings/$takeTimestampMs",
+                "recordings/$takeTimestampStr",
             )
             outputDir.mkdirs()
             currentOutputDir = outputDir
@@ -927,7 +953,7 @@ class RecordingPipeline(private val context: Context) {
             )
             val muxer = SegmentedMuxerController(
                 outputPathForSegment = { index ->
-                    File(outputDir, "${APP_NAME_TAG}_${takeTimestampMs}_segment_$index.mp4").absolutePath
+                    File(outputDir, "${APP_NAME_TAG}_${takeTimestampStr}_segment_$index.mp4").absolutePath
                 },
                 segmentDurationUs = segmentDurationMinutes * 60 * 1_000_000L,
                 orientationHintDegrees = orientationHint,
@@ -966,7 +992,7 @@ class RecordingPipeline(private val context: Context) {
             val hiResSink = if (actualCaptureRateHz > AUDIO_SAMPLE_RATE_HZ) {
                 HiResAudioSink(
                     outputPathForSegment = { index ->
-                        File(outputDir, "${APP_NAME_TAG}_${takeTimestampMs}_segment_$index.wav").absolutePath
+                        File(outputDir, "${APP_NAME_TAG}_${takeTimestampStr}_segment_$index.wav").absolutePath
                     },
                     sampleRateHz = actualCaptureRateHz,
                     channelCount = AUDIO_CHANNEL_COUNT,
@@ -1006,12 +1032,14 @@ class RecordingPipeline(private val context: Context) {
             audio.start()
 
             // Reconfigure the session to include both the preview and the encoder's InputSurface.
-            // Camera2 requires closing the current session and opening a new one when the
-            // output surface set changes — this causes a brief preview freeze (~100-200ms)
-            // at recording-start time, which is an acceptable UX trade-off for v1.
+            // Camera2 requires a new CameraCaptureSession when the output surface set
+            // changes, causing a brief preview freeze — see
+            // CameraSessionController.reconfigureSession's doc for the real-device
+            // measurement of that freeze (~650-1000ms, mostly HAL-side session
+            // configuration, not reducible by this call alone) and why the device itself
+            // is deliberately kept open rather than closed+reopened here.
             sessionMutex.withLock {
-                sessionController.stop()
-                sessionController.startRepeating(
+                sessionController.reconfigureSession(
                     cameraId = lens.cameraId,
                     outputSurfaces = listOfNotNull(previewSurface, video.inputSurface),
                     requestFactory = factory,
@@ -1179,7 +1207,11 @@ class RecordingPipeline(private val context: Context) {
             return
         }
         val error = nativeEngine.setMonitoringEnabled(enabled, outputDeviceId)
-        if (error != null) Log.w(TAG, "setMonitoringEnabled($enabled) returned error: $error")
+        if (error != null) {
+            Log.w(TAG, "setMonitoringEnabled($enabled) returned error: $error")
+        } else {
+            Log.i(TAG, "setMonitoringEnabled($enabled) succeeded")
+        }
         monitoringActive = enabled && error == null
         notifyMonitoringChanged(monitoringActive)
     }
@@ -1538,10 +1570,13 @@ class RecordingPipeline(private val context: Context) {
     /**
      * Rebuilds the live RECORDING-state capture session's surface set from the current
      * [previewSurface] (may be null — encoder-only) plus the active [videoEncoder]'s
-     * InputSurface. Camera2 requires closing and reopening the session whenever the
-     * output surface set changes (see [startRecording]'s doc) — same mechanism, just
-     * triggered here by preview attach/detach instead of the initial preview→recording
-     * transition.
+     * InputSurface. Camera2 requires a new `CameraCaptureSession` whenever the output
+     * surface set changes (see [startRecording]'s doc) — same mechanism, just triggered
+     * here by preview attach/detach instead of the initial preview→recording transition.
+     * Uses [CameraSessionController.reconfigureSession] rather than [CameraSessionController.stop]
+     * + `startRepeating` specifically because this can fire *mid-recording* — closing and
+     * reopening the `CameraDevice` here would be far more disruptive to an already-running
+     * take than at the other call sites.
      *
      * Caller must already hold [sessionMutex] (not reentrant — do not call this from
      * inside another `sessionMutex.withLock` block).
@@ -1561,8 +1596,7 @@ class RecordingPipeline(private val context: Context) {
         val lens = selectedLens ?: return
         val factory = requestFactory ?: return
         try {
-            sessionController.stop()
-            sessionController.startRepeating(
+            sessionController.reconfigureSession(
                 cameraId = lens.cameraId,
                 outputSurfaces = listOfNotNull(previewSurface, video.inputSurface),
                 requestFactory = factory,
