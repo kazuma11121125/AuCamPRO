@@ -201,6 +201,14 @@ JNIEXPORT jint JNICALL Java_com_aucampro_recorder_audio_NativeEngineBridge_nativ
     return guard.get() != nullptr ? guard.get()->hardwareXRunCount() : 0;
 }
 
+// Diagnostic (2026-07-18, monitor-noise investigation) — kept permanently, same as ringBufferOverrunCount/hardwareXRunCount — see
+// OboeFullDuplexEngine::monitorWriteShortfallCount's doc.
+JNIEXPORT jint JNICALL Java_com_aucampro_recorder_audio_NativeEngineBridge_nativeMonitorWriteShortfallCount(
+    JNIEnv *, jobject, jlong handle) {
+    EngineGuard guard(handle);
+    return guard.get() != nullptr ? guard.get()->monitorWriteShortfallCount() : 0;
+}
+
 // Returns [framePosition, timeNanos] (CLOCK_MONOTONIC), or null if unavailable. See
 // OboeFullDuplexEngine::getInputTimestamp for why this exists (a one-shot audio PTS
 // anchor correlation, not a per-callback query).

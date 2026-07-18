@@ -1200,20 +1200,40 @@ class RecordingPipeline(private val context: Context) {
      * speaker's own output back into the mic. Already-enabled monitoring is also force-off
      * if that output later disappears — see [onAudioDeviceSetChangedLocked].
      */
+    // 実機未検証 (2026-07-18, monitor OFF→ON silence investigation): code-inspection
+    // finding, not confirmed via a real-device repro — this used to mutate
+    // `monitoringActive` and call the (blocking) native setter directly on the caller's
+    // thread (the Settings-sheet Switch's onCheckedChange, i.e. main), the same
+    // single-thread-confinement violation [onAudioDeviceSetChangedLocked]'s doc already
+    // calls out for its own two callers, just never fixed here. This is a real, separate
+    // latent race (e.g. a toggle landing between [restartAudioEngineForQualityChange]'s
+    // unguarded `wasMonitoring` read and its later unconditional `monitoringActive =
+    // false` could leave this class's source of truth ON after the native engine was
+    // already rebuilt with monitoring off) — but a *plain* OFF→ON toggle with no
+    // concurrent session/quality/device-hotswap op in flight would not hit this window,
+    // so it is not asserted as the cause of the reported bug, only fixed alongside it.
+    // Routing through [sessionMutex] (same pattern as
+    // [setAudioQuality]/[dispatchAudioDeviceSetChanged]) closes that window;
+    // `Dispatchers.IO` for the native call is the same ANR-avoidance reasoning as
+    // [onAudioDeviceSetChangedLocked]'s doc (opening an AudioStream is not guaranteed fast).
     fun setMonitoringEnabled(enabled: Boolean, outputDeviceId: Int = 0) {
-        if (enabled && !audioDeviceRouter.hasSafeMonitoringOutput()) {
-            Log.w(TAG, "setMonitoringEnabled(true) rejected: no headphone-type output connected (would risk mic feedback)")
-            notifyMonitoringChanged(false)
-            return
+        pipelineScope.launch {
+            sessionMutex.withLock {
+                if (enabled && !audioDeviceRouter.hasSafeMonitoringOutput()) {
+                    Log.w(TAG, "setMonitoringEnabled(true) rejected: no headphone-type output connected (would risk mic feedback)")
+                    notifyMonitoringChanged(false)
+                    return@withLock
+                }
+                val error = withContext(Dispatchers.IO) { nativeEngine.setMonitoringEnabled(enabled, outputDeviceId) }
+                if (error != null) {
+                    Log.w(TAG, "setMonitoringEnabled($enabled) returned error: $error")
+                } else {
+                    Log.i(TAG, "setMonitoringEnabled($enabled) succeeded")
+                }
+                monitoringActive = enabled && error == null
+                notifyMonitoringChanged(monitoringActive)
+            }
         }
-        val error = nativeEngine.setMonitoringEnabled(enabled, outputDeviceId)
-        if (error != null) {
-            Log.w(TAG, "setMonitoringEnabled($enabled) returned error: $error")
-        } else {
-            Log.i(TAG, "setMonitoringEnabled($enabled) succeeded")
-        }
-        monitoringActive = enabled && error == null
-        notifyMonitoringChanged(monitoringActive)
     }
 
     private fun notifyMonitoringChanged(enabled: Boolean) {

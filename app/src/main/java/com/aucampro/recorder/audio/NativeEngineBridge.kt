@@ -78,6 +78,10 @@ class NativeEngineBridge : AutoCloseable {
 
     fun hardwareXRunCount(): Int = if (closed) 0 else nativeHardwareXRunCount(handle)
 
+    /** Diagnostic (2026-07-18, monitor-noise investigation) — kept permanently, same as ringBufferOverrunCount/hardwareXRunCount — see
+     * `OboeFullDuplexEngine::monitorWriteShortfallCount`'s doc. */
+    fun monitorWriteShortfallCount(): Int = if (closed) 0 else nativeMonitorWriteShortfallCount(handle)
+
     /**
      * One-shot (framePosition, timeNanos) correlation at CLOCK_MONOTONIC, used to seed
      * [com.aucampro.recorder.muxer.PtsClockDomain]'s audio anchor with the audio
@@ -144,6 +148,7 @@ class NativeEngineBridge : AutoCloseable {
     private external fun nativeRmsDb(handle: Long, channel: Int): Float
     private external fun nativeRingBufferOverrunCount(handle: Long): Int
     private external fun nativeHardwareXRunCount(handle: Long): Int
+    private external fun nativeMonitorWriteShortfallCount(handle: Long): Int
     private external fun nativeGetInputTimestamp(handle: Long): LongArray?
     private external fun nativeDrainEncoderBuffer(handle: Long, dst: FloatArray, maxFrames: Int): Int
     private external fun nativeFlushRingBuffer(handle: Long)

@@ -92,8 +92,13 @@ public:
     // close() on another. The output stream is only actually closed in stop(), which
     // closes the input stream first — guaranteeing onAudioReady() cannot fire again —
     // before it is safe to close the output stream too. A practical consequence: once
-    // opened, a monitor output stream stays open (idle when disabled) for the rest of the
-    // recording session rather than being torn down and reopened on every toggle.
+    // opened, a monitor output stream stays open for the rest of the recording session
+    // rather than being torn down and reopened on every toggle — but NOT idle while
+    // disabled (2026-07-18, OFF→ON silence investigation): onAudioReady() keeps writing
+    // silence to it even when this flag is false, since a LowLatency/None output stream
+    // left started-but-completely-unfed risks the HAL tearing it down on some real
+    // devices, which this method's "already open" fast path below would otherwise
+    // silently reuse dead on the next enable (see onAudioReady()'s doc for the fix).
     Result<void, std::string> setMonitoringEnabled(bool enabled, int32_t outputDeviceId);
 
     // UI/coroutine thread only.
@@ -122,6 +127,15 @@ public:
     float rmsDb(int channel) const { return meter_.rmsDb(channel); }
     int32_t ringBufferOverrunCount() const { return ringBufferOverrunCount_.load(std::memory_order_relaxed); }
     int32_t hardwareXRunCount() const;
+
+    // Diagnostic (2026-07-18, monitor-noise investigation) — kept permanently, same as ringBufferOverrunCount/hardwareXRunCount — counts callbacks
+    // where the monitor passthrough's non-blocking write() to the output stream
+    // (timeoutNanoseconds=0) wrote fewer frames than the callback delivered, i.e. audio
+    // was dropped from the monitor path specifically (distinct from
+    // ringBufferOverrunCount, which tracks the separate mic->encoder ring buffer). No
+    // equivalent counter existed for the monitor output before this; used to correlate
+    // audible noise with actual dropped-frame events on a real device.
+    int32_t monitorWriteShortfallCount() const { return monitorWriteShortfallCount_.load(std::memory_order_relaxed); }
 
     // UI/coroutine thread only — NOT the audio callback thread (Oboe's own docs advise
     // against calling getTimestamp() from onAudioReady, and it isn't needed there: this
@@ -205,6 +219,7 @@ private:
 
     std::atomic<bool> monitoringEnabled_{false};
     std::atomic<int32_t> ringBufferOverrunCount_{0};
+    std::atomic<int32_t> monitorWriteShortfallCount_{0};  // TEMPORARY diagnostic, see getter's doc
 };
 
 }  // namespace aucampro

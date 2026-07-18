@@ -926,8 +926,19 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
             var lastPublishedClippingL = false
             var lastPublishedClippingR = false
             var lastLabelPublishMs = 0L
+            // Diagnostic (2026-07-18, monitor-noise investigation) — kept permanently, same as ringBufferOverrunCount/hardwareXRunCount — logs
+            // (not published to any StateFlow, so no UI/recomposition cost beyond one
+            // extra native getter call per tick) whenever
+            // NativeEngineBridge.monitorWriteShortfallCount() advances, to correlate
+            // audible monitor noise with actual dropped-frame events on a real device.
+            var lastMonitorShortfallCount = 0
             while (isActive) {
                 delay(METER_POLL_INTERVAL_MS)
+                val monitorShortfallCount = pipeline.nativeEngine.monitorWriteShortfallCount()
+                if (monitorShortfallCount != lastMonitorShortfallCount) {
+                    Log.i(TAG, "monitorWriteShortfallCount: $lastMonitorShortfallCount -> $monitorShortfallCount")
+                    lastMonitorShortfallCount = monitorShortfallCount
+                }
                 // Quantized to METER_DB_STEP before publishing — real-device finding
                 // (PERF_INVESTIGATION_2026-07-17.md §2.3): peakDb/rmsDb are raw floats, so
                 // even silence-floor noise produced a *different* value on essentially
