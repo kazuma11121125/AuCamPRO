@@ -941,10 +941,22 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                 // or a clipping-state flip (must be immediate), and otherwise only let the
                 // numeric label refresh at LABEL_PUBLISH_INTERVAL_MS — still fast enough to
                 // read live, but no longer redrawing on every sub-segment dB wobble.
-                val segRmsL = meterSegmentIndex(rmsL)
-                val segRmsR = meterSegmentIndex(rmsR)
-                val segPeakL = meterSegmentIndex(peakL)
-                val segPeakR = meterSegmentIndex(peakR)
+                //
+                // meterSegmentIndexHysteresis (not the plain boundary floor/div) — round-2
+                // re-investigation (PERF_REINVESTIGATION_2026-07-17.md "追加ラウンド" §1)
+                // measured this room's ambient noise floor sitting almost exactly on a
+                // segment boundary (peak hovering ±2-3dB around one), and since segment
+                // boundaries are exact multiples of METER_DB_STEP, the smallest possible
+                // quantized wobble was enough to flip the segment back and forth on ~30% of
+                // ticks — defeating most of the intended gating on its own. A ±METER_DB_STEP
+                // Schmitt margin means a boundary must be cleared, not just touched, before
+                // the gate accepts the new segment, at the cost of the bar lagging the true
+                // level by at most one quantization step (imperceptible against a 2.5dB-wide
+                // segment).
+                val segRmsL = meterSegmentIndexHysteresis(rmsL, lastPublishedSegRmsL)
+                val segRmsR = meterSegmentIndexHysteresis(rmsR, lastPublishedSegRmsR)
+                val segPeakL = meterSegmentIndexHysteresis(peakL, lastPublishedSegPeakL)
+                val segPeakR = meterSegmentIndexHysteresis(peakR, lastPublishedSegPeakR)
                 val segmentChanged = segRmsL != lastPublishedSegRmsL || segRmsR != lastPublishedSegRmsR ||
                     segPeakL != lastPublishedSegPeakL || segPeakR != lastPublishedSegPeakR
                 val clippingChanged = clippingHeldL != lastPublishedClippingL || clippingHeldR != lastPublishedClippingR
@@ -977,6 +989,27 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     private fun meterSegmentIndex(db: Float): Int {
         val clamped = db.coerceIn(METER_SEGMENT_DB_FLOOR, METER_SEGMENT_DB_CEIL)
         return ((clamped - METER_SEGMENT_DB_FLOOR) / METER_SEGMENT_WIDTH_DB).toInt()
+    }
+
+    /** [meterSegmentIndex], but a Schmitt-trigger version that only reports a segment
+     * change once [db] has cleared the boundary by [METER_DB_STEP] — see the P9-a doc at
+     * this function's call site (PERF_REINVESTIGATION_2026-07-17.md "追加ラウンド" §1) for
+     * why the plain floor/divide version flapped on real ambient noise sitting on a
+     * boundary. [lastPublishedSeg] of `Int.MIN_VALUE` (the loop's initial sentinel) always
+     * accepts the raw segment immediately — there is no prior segment to hold onto. A jump
+     * of more than one segment is accepted immediately too (a real, unambiguous level
+     * change, not boundary noise) rather than applying hysteresis meant for single-segment
+     * wobble. */
+    private fun meterSegmentIndexHysteresis(db: Float, lastPublishedSeg: Int): Int {
+        val rawSeg = meterSegmentIndex(db)
+        if (rawSeg == lastPublishedSeg || lastPublishedSeg == Int.MIN_VALUE) return rawSeg
+        if (kotlin.math.abs(rawSeg - lastPublishedSeg) > 1) return rawSeg
+        val boundaryDb = METER_SEGMENT_DB_FLOOR + METER_SEGMENT_WIDTH_DB * maxOf(rawSeg, lastPublishedSeg)
+        return if (rawSeg > lastPublishedSeg) {
+            if (db >= boundaryDb + METER_DB_STEP) rawSeg else lastPublishedSeg
+        } else {
+            if (db < boundaryDb - METER_DB_STEP) rawSeg else lastPublishedSeg
+        }
     }
 
     private fun quantizeDb(db: Float): Float = Math.round(db / METER_DB_STEP) * METER_DB_STEP
