@@ -216,8 +216,15 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
             _uiState.update { it.copy(recordingState = RecordingUiState.StartingPreview) }
         }
         viewModelScope.launch {
-            val params = _uiState.value.toCameraParams()
-            val caps = pipeline.startPreview(surface, params)
+            val priorState = _uiState.value
+            val params = priorState.toCameraParams()
+            // Reopen on the lens that was active before this surface was torn down — e.g.
+            // returning from the gallery/Photos app backgrounds MainActivity, which destroys
+            // and recreates the SurfaceView (surfaceDestroyed → detachPreviewSurface →
+            // pipelineState IDLE), then this method fires again on the new surface. Without
+            // targetCameraId, startPreview() falls back to findStandardRearLens() and
+            // silently resets the user's lens choice back to the default rear lens.
+            val caps = pipeline.startPreview(surface, params, targetCameraId = priorState.selectedLensCameraId)
             if (wasRecording) {
                 // A recording was already in progress — this is the viewfinder returning
                 // after [detachPreviewSurface] dropped to an encoder-only session (§4.6
@@ -239,7 +246,19 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                 } catch (e: Exception) {
                     listOf(caps.videoConfig)
                 }
-                val selectedConfig = supportedConfigs.firstOrNull() ?: caps.videoConfig
+                // Same hazard restorePersistedSettings/switchLens already guard against
+                // (実機で発見, 2026-07-16): don't unconditionally default to
+                // supportedConfigs.firstOrNull() here, or a reattach after the user already
+                // picked a non-default resolution this session (e.g. returning from the
+                // gallery) silently reverts it. Prefer the config that was selected before
+                // this surface was torn down, validated against what the reopened camera
+                // actually supports.
+                val restoredConfig = priorState.selectedVideoConfig?.let { wanted ->
+                    supportedConfigs.firstOrNull {
+                        it.width == wanted.width && it.height == wanted.height && it.frameRate == wanted.frameRate
+                    }
+                }
+                val selectedConfig = restoredConfig ?: supportedConfigs.firstOrNull() ?: caps.videoConfig
 
                 _uiState.update { state ->
                     state.copy(
