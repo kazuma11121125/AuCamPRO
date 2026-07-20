@@ -388,6 +388,13 @@ class CameraCapabilityInspector(private val cameraManager: CameraManager) {
             // reproducible from a host build.
             VideoConfigCandidate(MediaFormat.MIMETYPE_VIDEO_AVC,  1920, 1080, 60, 20_000_000), // 16:9
             VideoConfigCandidate(MediaFormat.MIMETYPE_VIDEO_AVC,  1920, 1080, 30, 10_000_000), // 16:9
+            // 1080p24 — added 2026-07-20 for users who want more headroom below the ~33fps
+            // session ceiling than 30fps already gives (docs/
+            // VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md). Confirmed [24, 24] is one of
+            // this device's actual CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES entries, so
+            // ExposureMode.AUTO can select it exactly (not just fall back to HAL default).
+            // Bitrate scaled down from 1080p30's 10Mbps by the fps ratio (24/30).
+            VideoConfigCandidate(MediaFormat.MIMETYPE_VIDEO_AVC,  1920, 1080, 24,  8_000_000), // 16:9
             VideoConfigCandidate(MediaFormat.MIMETYPE_VIDEO_AVC,  1280,  720, 60,  8_000_000), // 16:9
         )
         return allCandidates
