@@ -622,11 +622,16 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Still-photo capture (§Photo mode) — see [RecordingPipeline.capturePhoto]'s doc.
-     * PREVIEWING only, not while RECORDING (crashes — see that method's real-device doc);
-     * the on-screen button already greys out via [CameraUiState.canCapturePhoto], this is
-     * just the same guard's second line of defense for any other caller. */
+     * PREVIEWING + [ExposureMode.MANUAL] only — not while RECORDING (crashes — see that
+     * method's real-device doc), and not in [ExposureMode.AUTO] (freezes the camera on
+     * this Sony HAL — see [CameraUiState.canCapturePhoto]'s doc). The on-screen button
+     * already greys out via [CameraUiState.canCapturePhoto], but that's a Compose
+     * `pointerInput` gate the *hardware* camera key's [onShutterPressed] path
+     * (`MainActivity.dispatchKeyEvent`) never goes through — this check is the one that
+     * actually stops a hardware-key press, not just a second line of defense. */
     @Suppress("MissingPermission") // only reachable once MainScreen (and PermissionGate) is composed
     fun capturePhoto() {
+        if (!_uiState.value.canCapturePhoto) return
         pipeline.capturePhoto()
     }
 

@@ -256,14 +256,14 @@ class CameraSessionController(private val cameraManager: CameraManager) {
         try {
             val builder = currentDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             builder.addTarget(jpegSurface)
-            // **実機で発見(2026-07-20)**: 一度ここもapplyExposure()(ExposureMode分岐)に
-            // 揃えたところ、Autoモード中の静止画撮影でカメラクライアントごと停止し、プレビューが
-            // 復帰しなくなる不具合を実機で確認した — CONTROL_AE_TARGET_FPS_RANGEは本来
-            // ストリーミング(TEMPLATE_RECORD)向けのキーで、TEMPLATE_STILL_CAPTURE(単発)に
-            // 付けるとこのHALが想定しない組み合わせになる模様。動画のExposureModeとは無関係に
-            // 常にapplyManualExposureへ戻す — Autoモード中の静止画がその時点のISO/シャッター
-            // 値になる(動画プレビューの露出と食い違う場合がある)のは把握済みだが、
-            // カメラクライアントが落ちるより明らかに軽い問題なので、これで確定とする。
+            // **実機で発見(2026-07-20)**: `TEMPLATE_STILL_CAPTURE`に`CONTROL_AE_MODE_ON`を
+            // 設定すると、`CONTROL_AE_TARGET_FPS_RANGE`を付けても付けなくても、このSony HALで
+            // カメラクライアントが停止する(`Camera3-Device: reconfigureCamera: Can't idle
+            // device in 5.000000 seconds!` → クライアント強制切断 → プレビュー復帰不能)。
+            // よってExposureMode.AUTO中の静止画撮影はViewModel層(canCapturePhoto/
+            // capturePhoto()の実効ガード)で完全に止めており、ここに到達するのは常にMANUALの
+            // 時のみ——このメソッド自体はExposureModeを分岐しない。docs/
+            // VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md §4.3参照。
             requestFactory.applyManualExposure(builder, params.iso, params.exposureTimeNanos, params.fps)
             requestFactory.applyFocus(builder, params.focusDistanceDiopters, params.afAuto)
             requestFactory.applyWhiteBalance(builder, params)
@@ -326,23 +326,16 @@ class CameraSessionController(private val cameraManager: CameraManager) {
     ): CaptureRequest.Builder {
         val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
         activeSurfaces.forEach { builder.addTarget(it) }
-        applyExposure(builder, factory, params)
+        // [ExposureMode]分岐 — capturePhoto()は静止画専用のapplyAutoExposureForStill()を
+        // 使う別経路なので、ここではapplyAutoExposureForVideo()のみ。
+        when (params.exposureMode) {
+            ExposureMode.AUTO -> factory.applyAutoExposureForVideo(builder, params.fps)
+            ExposureMode.MANUAL -> factory.applyManualExposure(builder, params.iso, params.exposureTimeNanos, params.fps)
+        }
         factory.applyFocus(builder, params.focusDistanceDiopters, params.afAuto)
         factory.applyWhiteBalance(builder, params)
         factory.applyZoom(builder, params.zoomRatio)
         return builder
-    }
-
-    /** [ExposureMode]分岐 — buildRequestBuilder()と[capturePhoto]の両方から使う。 */
-    private fun applyExposure(
-        builder: CaptureRequest.Builder,
-        factory: ManualCaptureRequestFactory,
-        params: CameraParams,
-    ) {
-        when (params.exposureMode) {
-            ExposureMode.AUTO -> factory.applyAutoExposure(builder, params.fps, lock = params.debugAeLock)
-            ExposureMode.MANUAL -> factory.applyManualExposure(builder, params.iso, params.exposureTimeNanos, params.fps)
-        }
     }
 
     /**

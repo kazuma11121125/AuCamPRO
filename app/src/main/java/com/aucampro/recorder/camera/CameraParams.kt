@@ -55,12 +55,4 @@ data class CameraParams(
     val manualWbGains: android.hardware.camera2.params.RggbChannelVector? = null,
     /** [ExposureMode.MANUAL] = existing default (ISO/shutter fully manual, AE_MODE_OFF). */
     val exposureMode: ExposureMode = ExposureMode.MANUAL,
-    /**
-     * 実機比較実験専用(2026-07-20調査): [exposureMode]が[ExposureMode.AUTO]の時だけ意味を
-     * 持つ。`true`で`CONTROL_AE_LOCK`を立てる — AE収束後にロックした状態が、高温時のHAL内部
-     * フレーム損失についてAE_ON(ロックなし)/AE_OFFとどう違うかを比較するための一時フラグ。
-     * 製品UIからは到達できない(通常のExposureMode切替では常にfalse) — 実機比較時は一時的な
-     * コード変更で有効にする。docs/VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md §4.3参照。
-     */
-    val debugAeLock: Boolean = false,
 )
