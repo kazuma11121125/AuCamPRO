@@ -173,8 +173,9 @@ HALが供給を落としている**ことを確定。
    - `CONTROL_AE_TARGET_FPS_RANGE`——`Range(fps, fps)`を無条件には使わず、
      `CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES`から実際に選べる範囲を選ぶ
      (`CaptureRangeClamper.selectAeFpsRange`、優先順位: ①`[fps,fps]`固定レンジ
-     ②fpsを含む最も狭いレンジ③同じ幅なら下限が高い方④該当なしなら`Range(fps,fps)`に
-     フォールバック)
+     ②fpsを含む最も狭いレンジ③同じ幅なら下限が高い方④**該当するレンジがない場合は
+     `CONTROL_AE_TARGET_FPS_RANGE`を設定せず、警告ログを出す**——未公開の
+     `Range(fps,fps)`は送らず、HALのAE_MODE_ONデフォルト動作に任せる)
    - `SENSOR_SENSITIVITY`/`SENSOR_EXPOSURE_TIME`/`SENSOR_FRAME_DURATION`は
      手動設定しない(AE ONの効果を上書きしてしまうため)
 

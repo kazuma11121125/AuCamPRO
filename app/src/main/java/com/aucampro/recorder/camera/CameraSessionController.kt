@@ -326,8 +326,13 @@ class CameraSessionController(private val cameraManager: CameraManager) {
     ): CaptureRequest.Builder {
         val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
         activeSurfaces.forEach { builder.addTarget(it) }
-        // [ExposureMode]分岐 — capturePhoto()は静止画専用のapplyAutoExposureForStill()を
-        // 使う別経路なので、ここではapplyAutoExposureForVideo()のみ。
+        // [ExposureMode]分岐(動画/プレビューのリピートリクエスト専用)。[capturePhoto]は
+        // ExposureModeを分岐せず常にapplyManualExposureを使う——AUTOモード中は
+        // ViewModel層(CameraUiState.canCapturePhoto)で静止画撮影自体を止めているため、
+        // capturePhotoへ到達するのは常にMANUALの時のみ。実機でTEMPLATE_STILL_CAPTUREに
+        // AE_MODE_ONを使うとこのHALが不安定になることが分かったため、静止画専用の
+        // Auto適用関数は存在しない(ManualCaptureRequestFactoryのapplyAutoExposureForVideo
+        // のdoc参照)。
         when (params.exposureMode) {
             ExposureMode.AUTO -> factory.applyAutoExposureForVideo(builder, params.fps)
             ExposureMode.MANUAL -> factory.applyManualExposure(builder, params.iso, params.exposureTimeNanos, params.fps)
