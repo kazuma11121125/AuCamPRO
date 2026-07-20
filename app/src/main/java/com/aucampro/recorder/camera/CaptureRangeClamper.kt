@@ -67,6 +67,30 @@ class CaptureRangeClamper(
             return minOf(exposureTimeNanos, frameDurationNanos)
         }
 
+        /**
+         * Picks the best `CONTROL_AE_TARGET_FPS_RANGE` for [targetFps] from
+         * [availableRanges] (`CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES`, as `lower to upper`
+         * pairs — plain `Pair<Int, Int>` rather than `android.util.Range` for the same
+         * host-testability reason as this class's other methods, see class doc). Never
+         * builds `Range(targetFps, targetFps)` unconditionally — that range might not
+         * actually be one of the device's advertised options.
+         *
+         * Priority: (1) an exact `[targetFps, targetFps]` fixed range, (2) the narrowest
+         * range that contains [targetFps] (least "slack" for the HAL to pick some other
+         * rate within it), (3) tie-broken by the higher lower bound (biases toward ranges
+         * that can't drop as low), (4) `null` if [targetFps] isn't in any available range
+         * — caller decides the fallback (this class doesn't guess one).
+         */
+        fun selectAeFpsRange(availableRanges: List<Pair<Int, Int>>, targetFps: Int): Pair<Int, Int>? {
+            val exact = availableRanges.firstOrNull { it.first == targetFps && it.second == targetFps }
+            if (exact != null) return exact
+
+            val containing = availableRanges.filter { targetFps in it.first..it.second }
+            if (containing.isEmpty()) return null
+
+            return containing.sortedWith(compareBy({ it.second - it.first }, { -it.first })).first()
+        }
+
         fun fromCharacteristics(characteristics: CameraCharacteristics): CaptureRangeClamper {
             val sensitivityRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
             val exposureTimeRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)

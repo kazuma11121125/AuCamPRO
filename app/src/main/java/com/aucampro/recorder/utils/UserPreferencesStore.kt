@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.net.Uri
 import com.aucampro.recorder.audio.AudioDeviceRouter
 import com.aucampro.recorder.audio.AudioQuality
+import com.aucampro.recorder.camera.ExposureMode
 import com.aucampro.recorder.ui.viewmodel.CameraUiState
 import com.aucampro.recorder.ui.viewmodel.EqBandState
 import com.aucampro.recorder.ui.viewmodel.FrameLineAspectRatio
@@ -35,6 +36,7 @@ class UserPreferencesStore(context: Context) {
         val kelvin: Double?,
         val wbAuto: Boolean,
         val afAuto: Boolean,
+        val exposureMode: ExposureMode,
         val frameLineAspectRatio: FrameLineAspectRatio,
         val audioInputPreference: AudioDeviceRouter.InputKind,
         val audioQuality: AudioQuality,
@@ -58,6 +60,11 @@ class UserPreferencesStore(context: Context) {
         kelvin = prefs.getFloat(KEY_KELVIN, -1f).takeIf { it > 0f }?.toDouble(),
         wbAuto = prefs.getBoolean(KEY_WB_AUTO, true),
         afAuto = prefs.getBoolean(KEY_AF_AUTO, true),
+        // 旧バージョン(このキーが存在しない)や不正な保存値は、既存動作を維持するため常に
+        // MANUALへフォールバックする — AUTOをデフォルトとして復元しない。
+        exposureMode = prefs.getString(KEY_EXPOSURE_MODE, null)
+            ?.let { name -> ExposureMode.entries.firstOrNull { it.name == name } }
+            ?: ExposureMode.MANUAL,
         frameLineAspectRatio = prefs.getString(KEY_FRAME_LINE, null)
             ?.let { name -> FrameLineAspectRatio.entries.firstOrNull { it.name == name } }
             ?: FrameLineAspectRatio.Off,
@@ -124,6 +131,7 @@ class UserPreferencesStore(context: Context) {
             putFloat(KEY_KELVIN, state.kelvin.toFloat())
             putBoolean(KEY_WB_AUTO, state.wbAuto)
             putBoolean(KEY_AF_AUTO, state.afAuto)
+            putString(KEY_EXPOSURE_MODE, state.exposureMode.name)
             putString(KEY_FRAME_LINE, state.settings.frameLineAspectRatio.name)
             putString(KEY_AUDIO_INPUT_PREFERENCE, state.settings.audioInputPreference.name)
             putString(KEY_AUDIO_QUALITY, state.settings.audioQuality.name)
@@ -167,6 +175,7 @@ class UserPreferencesStore(context: Context) {
         const val KEY_KELVIN = "kelvin"
         const val KEY_WB_AUTO = "wb_auto"
         const val KEY_AF_AUTO = "af_auto"
+        const val KEY_EXPOSURE_MODE = "exposure_mode"
         const val KEY_FRAME_LINE = "frame_line_aspect_ratio"
         const val KEY_AUDIO_INPUT_PREFERENCE = "audio_input_preference"
         const val KEY_AUDIO_QUALITY = "audio_quality"

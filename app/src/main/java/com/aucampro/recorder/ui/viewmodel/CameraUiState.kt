@@ -6,6 +6,7 @@ import com.aucampro.recorder.audio.AudioDeviceRouter
 import com.aucampro.recorder.audio.AudioQuality
 import com.aucampro.recorder.camera.CameraCapabilityInspector
 import com.aucampro.recorder.camera.CaptureRangeClamper
+import com.aucampro.recorder.camera.ExposureMode
 import com.aucampro.recorder.camera.FocusController
 import com.aucampro.recorder.pipeline.RecordingPipeline
 import java.io.File
@@ -259,7 +260,14 @@ data class CameraUiState(
      * When false: Locked manual focus.
      */
     val afAuto: Boolean = true,
-    
+
+    /**
+     * [ExposureMode.MANUAL] = existing default (ISO/shutter sliders active,
+     * AE_MODE_OFF). Chosen before recording only — see
+     * [CameraControlViewModel.setExposureMode]'s guard.
+     */
+    val exposureMode: ExposureMode = ExposureMode.MANUAL,
+
     val manualWbGains: android.hardware.camera2.params.RggbChannelVector? = null,
 
     // ── Digital zoom ─────────────────────────────────────────────────────────
@@ -355,8 +363,17 @@ data class CameraUiState(
 
     /** Mirrors [RecordingPipeline.capturePhoto]'s own guard — PREVIEWING only, NOT while
      * RECORDING (that crashes; see that method's doc for the real-device finding) — kept
-     * here too so the on-screen photo button can grey itself out without a round trip. */
-    val canCapturePhoto: Boolean get() = isPreviewing
+     * here too so the on-screen photo button can grey itself out without a round trip.
+     *
+     * **実機で発見(2026-07-20)**: also requires [ExposureMode.MANUAL]. Tried
+     * `CONTROL_AE_MODE_ON` on `TEMPLATE_STILL_CAPTURE` (with and without
+     * `CONTROL_AE_TARGET_FPS_RANGE`) for [ExposureMode.AUTO] stills — both froze the
+     * camera on this Sony HAL (`Camera3-Device: reconfigureCamera: Can't idle device in
+     * 5.000000 seconds!`, then the client disconnects and the preview never recovers).
+     * Disabling photo capture entirely while in Auto is the fix the user explicitly asked
+     * for over a silent Manual-values fallback — see
+     * docs/VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md §4.3. */
+    val canCapturePhoto: Boolean get() = isPreviewing && exposureMode == ExposureMode.MANUAL
 
     // THERMAL_STATUS_SEVERE == 3 (android.os.PowerManager) — see thermalStatus's doc for
     // why this is a raw Int comparison rather than a framework-typed field.

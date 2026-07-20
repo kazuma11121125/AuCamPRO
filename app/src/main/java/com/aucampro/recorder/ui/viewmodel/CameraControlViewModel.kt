@@ -14,6 +14,7 @@ import androidx.lifecycle.viewModelScope
 import com.aucampro.recorder.camera.CameraCapabilityInspector
 import com.aucampro.recorder.camera.CameraParams
 import com.aucampro.recorder.camera.CaptureRangeClamper
+import com.aucampro.recorder.camera.ExposureMode
 import com.aucampro.recorder.pipeline.RecordingPipeline
 import com.aucampro.recorder.utils.ThermalMonitor
 import com.aucampro.recorder.utils.UserPreferencesStore
@@ -342,6 +343,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         setWbAuto(saved.wbAuto)
         if (!saved.wbAuto) saved.kelvin?.let(::setKelvin)
         setAfAuto(saved.afAuto)
+        setExposureMode(saved.exposureMode)
         setFrameLineAspectRatio(saved.frameLineAspectRatio)
         setAudioInputPreference(saved.audioInputPreference)
         setAudioQuality(saved.audioQuality)
@@ -620,11 +622,31 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Still-photo capture (§Photo mode) — see [RecordingPipeline.capturePhoto]'s doc.
-     * PREVIEWING only, not while RECORDING (crashes — see that method's real-device doc);
-     * the on-screen button already greys out via [CameraUiState.canCapturePhoto], this is
-     * just the same guard's second line of defense for any other caller. */
+     * PREVIEWING + [ExposureMode.MANUAL] only — not while RECORDING (crashes — see that
+     * method's real-device doc), and not in [ExposureMode.AUTO] (freezes the camera on
+     * this Sony HAL — see [CameraUiState.canCapturePhoto]'s doc). The on-screen button
+     * already greys out via [CameraUiState.canCapturePhoto], but that's a Compose
+     * `pointerInput` gate the *hardware* camera key's [onShutterPressed] path
+     * (`MainActivity.dispatchKeyEvent`) never goes through — this check is the one that
+     * actually stops a hardware-key press, not just a second line of defense.
+     *
+     * Surfaces [CameraUiState.errorMessage] specifically for the Auto-mode case (not for
+     * "not previewing"/"recording", which stay silent — the on-screen controls already
+     * make those states obvious) since a user in Auto mode pressing the hardware camera
+     * key would otherwise see no feedback at all for why nothing happened. */
     @Suppress("MissingPermission") // only reachable once MainScreen (and PermissionGate) is composed
     fun capturePhoto() {
+        val state = _uiState.value
+        if (!state.isPreviewing) return
+        if (state.exposureMode == ExposureMode.AUTO) {
+            _uiState.update {
+                it.copy(
+                    errorMessage = "AUTO露出中は、この端末のカメラ互換性問題により静止画撮影を使用できません。" +
+                        "MANUALへ切り替えてください。",
+                )
+            }
+            return
+        }
         pipeline.capturePhoto()
     }
 
@@ -715,6 +737,17 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setKelvin(kelvin: Double) {
         _uiState.update { it.copy(wbAuto = false, kelvin = kelvin, manualWbGains = null) }
+        pushCameraParamsThrottled()
+    }
+
+    /**
+     * 製品方針(docs/VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md §3.3): 露出モードは
+     * 録画開始前にのみユーザーが選ぶ。録画中は無視する(自動切替も、この経路からのユーザー
+     * 操作も含めて禁止) — [selectVideoConfig]の録画中ガードと同じパターン。
+     */
+    fun setExposureMode(mode: ExposureMode) {
+        if (_uiState.value.isRecording) return
+        _uiState.update { it.copy(exposureMode = mode) }
         pushCameraParamsThrottled()
     }
 
@@ -1251,6 +1284,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         afAuto = this.afAuto,
         fps = this.selectedVideoConfig?.frameRate ?: this.fps,
         zoomRatio = this.zoomRatio,
+        exposureMode = this.exposureMode,
     )
 
     /**
@@ -1269,6 +1303,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
         val kelvin: Double,
         val wbAuto: Boolean,
         val afAuto: Boolean,
+        val exposureMode: com.aucampro.recorder.camera.ExposureMode,
         val frameLineAspectRatio: FrameLineAspectRatio,
         val audioInputPreference: com.aucampro.recorder.audio.AudioDeviceRouter.InputKind,
         val inputGainDb: Float,
@@ -1288,6 +1323,7 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
             kelvin = state.kelvin,
             wbAuto = state.wbAuto,
             afAuto = state.afAuto,
+            exposureMode = state.exposureMode,
             frameLineAspectRatio = state.settings.frameLineAspectRatio,
             audioInputPreference = state.settings.audioInputPreference,
             inputGainDb = state.inputGainDb,

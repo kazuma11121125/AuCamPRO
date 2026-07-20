@@ -6,6 +6,8 @@ import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.ColorSpaceTransform
 import android.hardware.camera2.params.MeteringRectangle
+import android.util.Log
+import android.util.Range
 
 /**
  * Applies §4.1's full-manual-control settings (exposure, WB, FPS-via-frame-duration,
@@ -39,11 +41,69 @@ class ManualCaptureRequestFactory(
         builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
         builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
         builder.set(CaptureRequest.SENSOR_SENSITIVITY, rangeClamper.clampSensitivity(iso))
-        builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, rangeClamper.clampExposureTimeNanos(exposureTimeNanos))
+        // 二重防御(docs/VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md §2): ViewModel側で
+        // fps変更時にシャッタースピードをクランプしているが、CaptureRequestを実際に組み立てる
+        // ここでも同じクランプを通す — 呼び出し元の経路が増えても
+        // frameDuration>=exposureTimeが常に成立することを保証する。
+        val clampedExposureTimeNanos = CaptureRangeClamper.clampExposureTimeNanosToFrameRate(exposureTimeNanos, fps)
+        builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, rangeClamper.clampExposureTimeNanos(clampedExposureTimeNanos))
         builder.set(
             CaptureRequest.SENSOR_FRAME_DURATION,
             rangeClamper.frameDurationNanosForFps(fps, frameDurationRangeNanos),
         )
+    }
+
+    /**
+     * `ExposureMode.AUTO` on the *video/preview* repeating request (`TEMPLATE_RECORD`):
+     * `CONTROL_AE_MODE_ON` + a `CONTROL_AE_TARGET_FPS_RANGE` picked from the device's
+     * actually-advertised ranges (never an unconditional `Range(fps, fps)` — see
+     * [CaptureRangeClamper.selectAeFpsRange]'s doc; if [targetFps] isn't in any advertised
+     * range, the key is left unset entirely rather than sending a range the device never
+     * published, and a warning is logged — the HAL's own AE_MODE_ON default behavior is a
+     * safer fallback than fabricating a range). Does **not** set
+     * `SENSOR_SENSITIVITY`/`SENSOR_EXPOSURE_TIME`/`SENSOR_FRAME_DURATION` — those are
+     * `AE_MODE_OFF`-only keys and setting them alongside `AE_MODE_ON` would fight the ISP's
+     * own exposure control. No stale-value risk from a previous `applyManualExposure` call:
+     * [CameraSessionController.buildRequestBuilder] always starts from a fresh
+     * `createCaptureRequest(TEMPLATE_RECORD)` builder, never reuses one.
+     *
+     * **Video-only — do not use for stills.** Real-device testing (2026-07-20) found that
+     * `CONTROL_AE_MODE_ON` on a `TEMPLATE_STILL_CAPTURE` request hangs/kills the camera
+     * client on this Sony HAL (`Camera3-Device: reconfigureCamera: Can't idle device in
+     * 5.000000 seconds!`, then a forced disconnect, preview never recovers) — tried both
+     * with and without `CONTROL_AE_TARGET_FPS_RANGE` set, both froze it. There is
+     * deliberately no `applyAutoExposureForStill()`: still capture always uses
+     * [applyManualExposure] regardless of `ExposureMode`, and photo capture is disabled
+     * entirely while `ExposureMode.AUTO` is active (see
+     * [com.aucampro.recorder.ui.viewmodel.CameraUiState.canCapturePhoto]'s doc) rather than
+     * silently falling back to stale Manual values.
+     */
+    fun applyAutoExposureForVideo(builder: CaptureRequest.Builder, targetFps: Int) {
+        builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+        builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+        resolveAeFpsRange(targetFps)?.let { builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+    }
+
+    /** `null` if [targetFps] isn't in any range this device actually advertises — caller
+     * must not fabricate one (see [applyAutoExposureForVideo]'s doc). */
+    private fun resolveAeFpsRange(targetFps: Int): Range<Int>? {
+        val available = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            ?.map { it.lower to it.upper }
+            ?: emptyList()
+        val selected = CaptureRangeClamper.selectAeFpsRange(available, targetFps)
+        if (selected == null) {
+            Log.w(
+                "ManualCaptureRequestFactory",
+                "AE fps range: target=$targetFps not in any advertised range $available — " +
+                    "leaving CONTROL_AE_TARGET_FPS_RANGE unset (HAL default)",
+            )
+            return null
+        }
+        Log.i(
+            "ManualCaptureRequestFactory",
+            "AE fps range: target=$targetFps available=$available selected=$selected",
+        )
+        return Range(selected.first, selected.second)
     }
 
     /** Base state (§4.1): MF locked at a fixed distance or continuous video AF. */

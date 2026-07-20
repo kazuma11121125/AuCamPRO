@@ -1,11 +1,15 @@
 # 録画動画のカクつき(フレームレート崩壊)調査 — 原因①修正済み・原因②調査継続中
 
 最終更新: 2026-07-20
-コード基準: `dad2cb4` + 本セッションの作業ツリー変更(下記「変更したファイル」参照、未コミット)
+コード基準: `f19893a`(原因①修正+診断ツール) + branch `feat/exposure-mode-comparison`(露出モード分離)
 対象実機: Sony SO-51C
-状態: **原因①は根本原因を特定・修正・実機検証済み。原因②はAE_MODE_OFFが実機で悪化要因と
-確定したが未解決。AE_ON/AE_OFF/AE_LOCKの3条件比較と、露出モード明示分離の設計まで完了、
-実装はまだ行っていない。**
+状態: **原因①は根本原因を特定・修正・実機検証済み(main向けコミット済み)。原因②は
+`AE_MODE_OFF`常時強制が悪化要因と確定(3-5fps→21-22fpsに改善)したが未解決。
+ユーザー承認の製品方針に基づき、Auto/Manual露出モードの明示分離を実装・実機検証済み
+(branch `feat/exposure-mode-comparison`、Draft PR作成済み、mainへ未マージ)。実機で
+静止画撮影がAE_MODE_ON関連で2段階のカメラクライアント停止を起こすことを発見し、
+最終的にAutoモード中の静止画撮影自体を無効化して解決(§4.3)。AE_LOCK比較の自動化・
+専用UI/データモデルは意図的に未実装(§4.4)。**
 
 ## 0. 経緯・使ったツール
 
@@ -158,62 +162,116 @@ HALが供給を落としている**ことを確定。
   ことはしない。** マニュアル露出(ISO/シャッタースピードの手動制御)はこのアプリの
   中核機能であり、既存の`Manual Exposure`パスは削除しない。
 - **録画中にAE_OFF↔ONを無断で自動切り替えする実装もしない。**
-- 次に進めるのは、露出制御を**ユーザーが録画前に選ぶ明示的な2モード**へ分離する設計・
-  最小実装(下記§4)。大規模な本実装はまだ行わない。
+- 露出制御を**ユーザーが録画前に選ぶ明示的な2モード**へ分離する(下記§4、実装済み)。
 
-## 4. 設計案: 露出制御の明示モード分離(未実装)
+## 4. 露出モードの明示分離(実装・実機検証済み)
 
 ### 4.1 モード定義
 
-1. **Auto Exposure**
+1. **Auto Exposure**(`ExposureMode.AUTO`)
    - `CONTROL_AE_MODE_ON`
-   - `CONTROL_AE_TARGET_FPS_RANGE`を選択中のfpsに設定(`Range(fps, fps)`)
+   - `CONTROL_AE_TARGET_FPS_RANGE`——`Range(fps, fps)`を無条件には使わず、
+     `CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES`から実際に選べる範囲を選ぶ
+     (`CaptureRangeClamper.selectAeFpsRange`、優先順位: ①`[fps,fps]`固定レンジ
+     ②fpsを含む最も狭いレンジ③同じ幅なら下限が高い方④**該当するレンジがない場合は
+     `CONTROL_AE_TARGET_FPS_RANGE`を設定せず、警告ログを出す**——未公開の
+     `Range(fps,fps)`は送らず、HALのAE_MODE_ONデフォルト動作に任せる)
    - `SENSOR_SENSITIVITY`/`SENSOR_EXPOSURE_TIME`/`SENSOR_FRAME_DURATION`は
      手動設定しない(AE ONの効果を上書きしてしまうため)
 
-2. **Manual Exposure**(既存の`applyManualExposure`相当、変更なし)
+2. **Manual Exposure**(`ExposureMode.MANUAL`、デフォルト=既存動作)
    - `CONTROL_AE_MODE_OFF`
    - ISO・露光時間・フレーム時間を手動設定
-   - 露光時間はフレーム周期以下へクランプ(§2.3で実装済みの
-     `clampExposureTimeNanosToFrameRate`をそのまま使う)
+   - 露光時間はフレーム周期以下へクランプ(§2.3の`clampExposureTimeNanosToFrameRate`を
+     ViewModel側のfps変更時とCaptureRequest生成直前の両方で適用——二重防御)
 
-**モード切替は録画開始前のみ**。録画中は現在のモードを維持し、自動切替は行わない
-(既存の`if (_uiState.value.isRecording) return`ガードのパターンを踏襲)。
+**モード切替は録画開始前のみ**。`CameraControlViewModel.setExposureMode()`は
+`isRecording`中は無視する(`selectVideoConfig`と同じガードパターン)。UIのSwitchも
+録画中は`enabled=false`。
 
-### 4.2 変更が必要な箇所(未実装・リストのみ)
+### 4.2 実装したファイル
 
 | ファイル | 変更内容 |
 |---|---|
-| `camera/CameraParams.kt` | `exposureMode: ExposureMode`(enum: `AUTO`/`MANUAL`、デフォルト`MANUAL`=現状維持)を追加 |
-| `camera/ManualCaptureRequestFactory.kt` | 既存`applyManualExposure()`はそのまま残し、新規`applyAutoExposure(builder, fps)`を追加(AE_MODE_ON + AE_TARGET_FPS_RANGEのみ設定) |
-| `camera/CameraSessionController.kt` | `buildRequestBuilder()`が`params.exposureMode`で`applyManualExposure`/`applyAutoExposure`を分岐 |
-| `ui/viewmodel/CameraUiState.kt` | `exposureMode: ExposureMode = ExposureMode.MANUAL`を追加(既存`wbAuto`/`afAuto`と同じ位置づけ) |
-| `ui/viewmodel/CameraControlViewModel.kt` | `setExposureMode(mode)`を追加(`setWbAuto`/`setAfAuto`と同じパターン: `_uiState.update` + `pushCameraParamsThrottled()`)。**録画中は呼んでも無視**するガードを追加(`if (_uiState.value.isRecording) return`) |
-| `utils/UserPreferencesStore.kt` | `exposureMode`の永続化(既存`wbAuto`/`afAuto`と同じパターンで`KEY_EXPOSURE_MODE`) |
-| UI(設定パネル) | Auto/Manual切り替えトグル追加。録画中はグレーアウト(既存のfps/解像度ピッカーが録画中にグレーアウトされているのと同じ扱い) |
+| `camera/ExposureMode.kt`(新規) | `enum class ExposureMode { AUTO, MANUAL }` |
+| `camera/CameraParams.kt` | `exposureMode: ExposureMode = ExposureMode.MANUAL`、`debugAeLock: Boolean = false`(§4.4参照)を追加 |
+| `camera/CaptureRangeClamper.kt` | `selectAeFpsRange()`追加(純粋関数、`android.util.Range`ではなく`Pair<Int,Int>`で表現——このクラスの既存方針と同じ理由でホストテスト可能にするため) |
+| `camera/ManualCaptureRequestFactory.kt` | 新規`applyAutoExposureForVideo(builder, targetFps)`追加(動画/プレビュー専用)。既存`applyManualExposure()`に二重防御クランプを追加。fpsレンジが見つからない場合は`CONTROL_AE_TARGET_FPS_RANGE`自体を設定しない(未公開の`Range(fps,fps)`を送らない) |
+| `camera/CameraSessionController.kt` | `buildRequestBuilder()`が`params.exposureMode`で`applyAutoExposureForVideo`/`applyManualExposure`を分岐。**`capturePhoto()`(`TEMPLATE_STILL_CAPTURE`)は分岐せず常に`applyManualExposure`固定**——理由は§4.3の実機不具合参照 |
+| `ui/viewmodel/CameraUiState.kt` | `exposureMode: ExposureMode = ExposureMode.MANUAL`を追加。**`canCapturePhoto`が`exposureMode == MANUAL`も要求するよう変更**(§4.3) |
+| `ui/viewmodel/CameraControlViewModel.kt` | `setExposureMode(mode)`追加(録画中ガード付き)。`toCameraParams()`/`restorePersistedSettings()`/`PersistSnapshot`に反映。**`capturePhoto()`に`canCapturePhoto`の実効ガードを追加**(§4.3) |
+| `utils/UserPreferencesStore.kt` | `exposureMode`永続化(`KEY_EXPOSURE_MODE`、文字列名。旧バージョン/不正値は常に`MANUAL`へフォールバック) |
+| `ui/MainScreen.kt` | ISO/SHUTTERスライダーの上に「EXPOSURE: AUTO/MANUAL」Switch追加。Autoの間はISO/SHUTTER/シャッタープリセットを無効化(値は保持、消去しない)。写真シャッターボタンもAuto中はグレーアウト |
+| `ui/components/ManualControlSlider.kt` | `IsoSlider`/`ShutterSlider`に`enabled`パラメータ追加 |
 
-### 4.3 次の実機検証候補: AE_ON + AE_LOCK
+`CameraParams.debugAeLock`(AE_LOCK比較実験用フラグ)は当初追加したが、後述の理由で
+削除した——製品データモデルに常時`false`のデバッグ専用フィールドを残さない判断。
 
-§3.2の比較にもう1条件を追加する。
+### 4.3 実機で発見・修正した不具合: Autoモード中の静止画撮影でカメラクライアントが停止(2段階)
 
-3. **AE_ON + AE_LOCK**: `CONTROL_AE_MODE_ON`で露出収束後に`CONTROL_AE_LOCK=true`を
-   設定するモード。露出は自動収束させつつ、収束後は値を固定する(完全なAE_OFFではない
-   が、ユーザーが録画中に露出が動くのを嫌う場合の妥協案になり得る)。
+**1回目**: `capturePhoto()`(`TEMPLATE_STILL_CAPTURE`)にも動画と同じ
+`applyAutoExposure(builder, targetFps)`(`AE_MODE_ON` + `CONTROL_AE_TARGET_FPS_RANGE`)を
+適用したところ、Autoモードで静止画を撮った瞬間にプレビュー全体が復帰不能になるまで
+固まった。ログ上は`Camera2ClientBase`のデストラクタが実行され、カメラクライアントごと
+終了していた(アプリ自体はクラッシュせずプロセスは生存、`mResumed=true`のまま)。
 
-3条件(AE_ON / AE_ON+AE_LOCK / AE_OFF)を、同程度の`CAM_CRITICAL`発火状況下で比較する
-——この投稿時点では未実施。実機再検証時は、前回と同様
-「`StreamingA FPS`(センサー)」と「`video stream FPS`(HAL配信)」の両方をログ取得し、
-両者の比を3条件で並べる。
+**2回目**: `CONTROL_AE_TARGET_FPS_RANGE`が原因という仮説のもと、静止画専用に
+`CONTROL_AE_TARGET_FPS_RANGE`を設定しない`applyAutoExposureForStill()`
+(`AE_MODE_ON`のみ)を用意して差し替えたが、**それでも実機で再現した**。今回はログに
+`Camera3-Device: reconfigureCamera: Can't idle device in 5.000000 seconds!`——写真を
+2枚撮った数秒後にHAL側のidle待ちがタイムアウトし、その後カメラクライアントが強制切断
+された。1回目と合わせると、**`CONTROL_AE_TARGET_FPS_RANGE`の有無に関係なく、
+`CONTROL_AE_MODE_ON`自体を`TEMPLATE_STILL_CAPTURE`(単発リクエスト)に使うことが、
+このSony HALでは不安定である**ことが確定した(`TEMPLATE_RECORD`のリピートリクエストで
+は同じ`AE_MODE_ON`が問題なく動作している——単発リクエストへの適用だけが問題)。
+
+**最終対応(ユーザー承認済みの回避策)**: 静止画側にAuto用の適用関数は用意しない
+(`applyAutoExposureForStill`は削除)。代わりに、**Autoモード中は静止画撮影そのものを
+無効化する**——`CameraUiState.canCapturePhoto`が`isPreviewing && exposureMode ==
+MANUAL`を要求するよう変更し、`CameraControlViewModel.capturePhoto()`にも同じ条件の
+実効ガードを追加した。**この実効ガードが必要だった理由**: オンスクリーンの📷ボタンは
+Composeの`pointerInput`で`canCapturePhoto`を見て無効化されるが、**ハードウェアの
+カメラキー**(`MainActivity.dispatchKeyEvent` → `onShutterPressed()`)はそのUIの
+`pointerInput`ゲートを経由しない別経路のため、ViewModel層に実際のガードがないと
+素通りしてしまう(実機で確認: ハードウェアキーでの連続撮影がまさにこの経路で発生した)。
+
+実機検証済み(2026-07-20、再起動後含む): Autoモードで📷ボタン/ハードウェアキーとも
+無反応(クラッシュ・フリーズなし)、MANUALへ切替後は撮影正常、レンズ切替後・録画停止
+直後・ギャラリー復帰後のいずれもAutoモードでは無反応のまま安定。
+
+Autoモード中に静止画を撮りたい場合、`AE_MODE_ON`を単発リクエストに使う以外の方法
+(例: 直前のリピートリクエストのAE収束値をそのまま`AE_MODE_OFF`+手動値としてコピーする
+など)を実機で個別に検証する必要がある——次にこの経路を触る時は必ず実機で確認すること。
+
+### 4.4 未実装(意図的にスコープ外): AE_LOCK比較の自動化・専用UI
+
+当初案(ChatGPT提供の仕様)では、`AUTO_LOCK_TEST`という第3のデバッグ専用モードを
+Developer Options的なUIで切り替え、`CONTROL_AE_STATE`の収束をCaptureResultで監視して
+タイムアウト付きで自動的に`CONTROL_AE_LOCK=true`にする、という専用ハーネスを想定していた。
+
+**今回はこれを実装していない**。当初`CameraParams.debugAeLock: Boolean`と
+`applyAutoExposure(..., lock: Boolean)`パラメータを用意したが、§4.3の2回目の実機不具合
+(静止画Auto全面禁止)を受けて**削除した**——AE_LOCKの有効性自体が未検証な状態で、
+常に`false`かつ製品UIから到達不能なフィールドを本番の`CameraParams`データモデルに
+恒久的に残すのは避ける判断(常時`false`の実験用フィールドをモデルに残さない)。
+
+実機比較する場合は、本セッションで実際に行った方法(§3.2/§4.3の実験と同じ)——
+`applyManualExposure`または`applyAutoExposureForVideo`の呼び出しを一時的にコード変更→
+`./gradlew assembleDebug`→`adb install -r`→実機で同条件下でテスト→ログ確認→元に戻す
+——を使うのが、まだ検証されていない機能のための恒久的なUI/データモデルを先に作るより
+合理的。AE_LOCKを試す場合は`applyAutoExposureForVideo`に`lock: Boolean`引数を一時的に
+追加し、`CONTROL_AE_LOCK`を設定する行を加えて実機検証してから、正式に必要か判断する。
 
 ## 5. まとめ
 
 | # | 原因 | 発生条件 | 状態 |
 |---|---|---|---|
 | ① | シャッタースピードが映像fpsと無関係に永続化され、`frameDuration>=exposureTime`制約で実際のfpsを食う | 常時 | **修正済み・実機検証済み**(60fps: 33fps→58fps、30fps: 目標に一致) |
-| ② | AuCamPROのセッションに対してのみ、高温時にHAL内部でフレーム配信が崩れる(Sony純正は同条件で無影響)。`AE_MODE_OFF`常時強制が悪化要因と確定(3〜5fps→21〜22fpsに改善)だが未解決 | 端末が`CAM_CRITICAL`の時のみ | 未解決。露出モード明示分離(§4)が次の実装候補、AE_LOCK条件の追加検証が次の調査候補 |
+| ② | AuCamPROのセッションに対してのみ、高温時にHAL内部でフレーム配信が崩れる(Sony純正は同条件で無影響)。`AE_MODE_OFF`常時強制が悪化要因と確定(3〜5fps→21〜22fpsに改善)だが未解決 | 端末が`CAM_CRITICAL`の時のみ | 未解決。露出モード明示分離(§4)は実装・実機検証済み(録画/プレビュー用)。静止画Autoは実機不具合により無効化。AE_LOCK条件の追加検証(§4.4)は次回 |
 
-## 6. このセッションで変更したファイル(原因①の修正、コミット前)
+## 6. このセッションで変更したファイル
 
+**原因①の修正 + 診断ツール**(コミット`f19893a`、main向け):
 - `tools/rec_diagnose.py`(新規) — MP4カクつき/WAV音割れ診断ツール
 - `app/build.gradle.kts` — `BuildConfig`にgit SHA/dirty/ビルド時刻を埋め込み
 - `app/src/main/java/com/aucampro/recorder/AuCamPROApplication.kt` — 起動時に`BuildInfo`ログ出力
@@ -221,6 +279,23 @@ HALが供給を落としている**ことを確定。
 - `app/src/main/java/com/aucampro/recorder/ui/viewmodel/CameraControlViewModel.kt` — `selectVideoConfig()`/`switchLens()`/`attachPreviewSurface()`再アタッチパスにクランプ適用
 - `app/src/test/java/com/aucampro/recorder/camera/CaptureRangeClamperTest.kt` — 上記のテスト追加
 
-`camera/CameraCapabilityInspector.kt`と`pipeline/RecordingPipeline.kt`は、§2.1で反証した
-仮説の実装(セッション能力チェック)を追加した後、同じセッションで削除済み——差分としては
-変化なし。
+**露出モード明示分離**(§4、branch `feat/exposure-mode-comparison`、mainへ未マージ・Draft PR):
+- `app/src/main/java/com/aucampro/recorder/camera/ExposureMode.kt`(新規)
+- `app/src/main/java/com/aucampro/recorder/camera/CameraParams.kt`
+- `app/src/main/java/com/aucampro/recorder/camera/CaptureRangeClamper.kt`(`selectAeFpsRange`追加)
+- `app/src/main/java/com/aucampro/recorder/camera/ManualCaptureRequestFactory.kt`(`applyAutoExposureForVideo`のみ、静止画用関数はなし)
+- `app/src/main/java/com/aucampro/recorder/camera/CameraSessionController.kt`
+- `app/src/main/java/com/aucampro/recorder/ui/viewmodel/CameraUiState.kt`(`canCapturePhoto`にAuto中の写真無効化を追加)
+- `app/src/main/java/com/aucampro/recorder/ui/viewmodel/CameraControlViewModel.kt`(`capturePhoto()`に実効ガード追加——ハードウェアキー経路はUIの`pointerInput`ゲートを経由しないため必須)
+- `app/src/main/java/com/aucampro/recorder/utils/UserPreferencesStore.kt`
+- `app/src/main/java/com/aucampro/recorder/ui/MainScreen.kt`
+- `app/src/main/java/com/aucampro/recorder/ui/components/ManualControlSlider.kt`
+- `app/src/test/java/com/aucampro/recorder/camera/CaptureRangeClamperTest.kt`(`selectAeFpsRange`のテスト追加)
+
+**マージ前に確認済み**: `./gradlew testDebugUnitTest`/`assembleDebug`は成功。
+`lintDebug`は4件のエラーで失敗するが、いずれもこのブランチの変更と無関係な既存の問題
+(`CameraControlViewModel.kt:383`の`MissingPermission`、`MainActivity.kt`の
+`RestrictedApi`×2件——このブランチの変更を全て一時的にstashしても同じ4件が再現する
+ことを確認済み)。実機(Sony SO-51C、再起動を挟んで2回)で、Autoモード中の写真撮影が
+オンスクリーンボタン・ハードウェアキーの両方で安全に無反応になること、MANUALモードの
+写真撮影・録画・レンズ切替・ギャラリー復帰のいずれも正常に動作することを確認済み。

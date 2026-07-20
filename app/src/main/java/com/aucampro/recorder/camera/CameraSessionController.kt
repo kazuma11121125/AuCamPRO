@@ -256,6 +256,14 @@ class CameraSessionController(private val cameraManager: CameraManager) {
         try {
             val builder = currentDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             builder.addTarget(jpegSurface)
+            // **実機で発見(2026-07-20)**: `TEMPLATE_STILL_CAPTURE`に`CONTROL_AE_MODE_ON`を
+            // 設定すると、`CONTROL_AE_TARGET_FPS_RANGE`を付けても付けなくても、このSony HALで
+            // カメラクライアントが停止する(`Camera3-Device: reconfigureCamera: Can't idle
+            // device in 5.000000 seconds!` → クライアント強制切断 → プレビュー復帰不能)。
+            // よってExposureMode.AUTO中の静止画撮影はViewModel層(canCapturePhoto/
+            // capturePhoto()の実効ガード)で完全に止めており、ここに到達するのは常にMANUALの
+            // 時のみ——このメソッド自体はExposureModeを分岐しない。docs/
+            // VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md §4.3参照。
             requestFactory.applyManualExposure(builder, params.iso, params.exposureTimeNanos, params.fps)
             requestFactory.applyFocus(builder, params.focusDistanceDiopters, params.afAuto)
             requestFactory.applyWhiteBalance(builder, params)
@@ -318,7 +326,17 @@ class CameraSessionController(private val cameraManager: CameraManager) {
     ): CaptureRequest.Builder {
         val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
         activeSurfaces.forEach { builder.addTarget(it) }
-        factory.applyManualExposure(builder, params.iso, params.exposureTimeNanos, params.fps)
+        // [ExposureMode]分岐(動画/プレビューのリピートリクエスト専用)。[capturePhoto]は
+        // ExposureModeを分岐せず常にapplyManualExposureを使う——AUTOモード中は
+        // ViewModel層(CameraUiState.canCapturePhoto)で静止画撮影自体を止めているため、
+        // capturePhotoへ到達するのは常にMANUALの時のみ。実機でTEMPLATE_STILL_CAPTUREに
+        // AE_MODE_ONを使うとこのHALが不安定になることが分かったため、静止画専用の
+        // Auto適用関数は存在しない(ManualCaptureRequestFactoryのapplyAutoExposureForVideo
+        // のdoc参照)。
+        when (params.exposureMode) {
+            ExposureMode.AUTO -> factory.applyAutoExposureForVideo(builder, params.fps)
+            ExposureMode.MANUAL -> factory.applyManualExposure(builder, params.iso, params.exposureTimeNanos, params.fps)
+        }
         factory.applyFocus(builder, params.focusDistanceDiopters, params.afAuto)
         factory.applyWhiteBalance(builder, params)
         factory.applyZoom(builder, params.zoomRatio)

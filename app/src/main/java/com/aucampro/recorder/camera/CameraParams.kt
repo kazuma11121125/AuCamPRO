@@ -53,4 +53,6 @@ data class CameraParams(
      * Exact RGB gains captured from Auto mode to ensure seamless transition to Manual mode.
      */
     val manualWbGains: android.hardware.camera2.params.RggbChannelVector? = null,
+    /** [ExposureMode.MANUAL] = existing default (ISO/shutter fully manual, AE_MODE_OFF). */
+    val exposureMode: ExposureMode = ExposureMode.MANUAL,
 )
