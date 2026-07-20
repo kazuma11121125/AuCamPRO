@@ -139,6 +139,19 @@ class CameraCapabilityInspector(private val cameraManager: CameraManager) {
      * guarantee a specific resolution/fps/bitrate/codec combination is actually
      * supported. Checks the real encoder capability via `MediaCodecList` rather than
      * inferring it from the camera's hardware level.
+     *
+     * **Not the fps-ceiling fix**: a real-device investigation on 2026-07-20 initially
+     * added a `StreamConfigurationMap.getOutputMinFrameDuration()`-based session check
+     * here, on the theory that the *session* (not the encoder) couldn't sustain the
+     * requested fps. That check was removed — this device's `StreamConfigurationMap`
+     * reports 60fps as achievable (`getOutputMinFrameDuration` = 16.67ms for both the
+     * preview and encoder surfaces), so it would have failed open (no-op) anyway. The
+     * real cause (confirmed via `CaptureResult.SENSOR_EXPOSURE_TIME`/
+     * `SENSOR_FRAME_DURATION` on-device) was a stale/persisted shutter-speed setting
+     * (~1/33s) independently forcing `SENSOR_FRAME_DURATION` up to match it — Camera2
+     * always requires `frameDuration >= exposureTime`. Fixed at
+     * `CameraControlViewModel.selectVideoConfig()` (clamps exposure time to the newly
+     * selected fps), not here — see docs/VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md §2.
      */
     fun isVideoConfigSupported(
         mimeType: String,

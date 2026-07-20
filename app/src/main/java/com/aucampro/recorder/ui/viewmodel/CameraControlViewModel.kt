@@ -261,6 +261,12 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                 val selectedConfig = restoredConfig ?: supportedConfigs.firstOrNull() ?: caps.videoConfig
 
                 _uiState.update { state ->
+                    // 実機で発見(2026-07-20): selectVideoConfig()と同じシャッタースピード
+                    // 不整合がここにもある — docs/VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md §2。
+                    val clampedExposureTimeNanos = CaptureRangeClamper.clampExposureTimeNanosToFrameRate(
+                        state.exposureTimeNanos, selectedConfig.frameRate,
+                    )
+                    val shutterPresetStillFits = state.shutterPreset?.exposureTimeNanos() == clampedExposureTimeNanos
                     state.copy(
                         recordingState = RecordingUiState.Previewing,
                         capabilities = caps,
@@ -271,6 +277,8 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                         maxZoomRatio = allLenses.firstOrNull { it.cameraId == caps.cameraId }?.maxDigitalZoom ?: 1f,
                         iso = params.iso.coerceIn(caps.isoRange),
                         fps = selectedConfig.frameRate,
+                        exposureTimeNanos = clampedExposureTimeNanos,
+                        shutterPreset = state.shutterPreset.takeIf { shutterPresetStillFits },
                         errorMessage = null,
                     )
                 }
@@ -426,6 +434,12 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                 val selectedConfig = restoredConfig ?: supportedConfigs.firstOrNull() ?: caps.videoConfig
 
                 _uiState.update { state ->
+                    // 実機で発見(2026-07-20): selectVideoConfig()と同じシャッタースピード
+                    // 不整合がここにもある — docs/VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md §2。
+                    val clampedExposureTimeNanos = CaptureRangeClamper.clampExposureTimeNanosToFrameRate(
+                        state.exposureTimeNanos, selectedConfig.frameRate,
+                    )
+                    val shutterPresetStillFits = state.shutterPreset?.exposureTimeNanos() == clampedExposureTimeNanos
                     state.copy(
                         recordingState = RecordingUiState.Previewing,
                         capabilities = caps,
@@ -435,6 +449,8 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                         maxZoomRatio = lens.maxDigitalZoom,
                         zoomRatio = clampedZoom,
                         fps = selectedConfig.frameRate,
+                        exposureTimeNanos = clampedExposureTimeNanos,
+                        shutterPreset = state.shutterPreset.takeIf { shutterPresetStillFits },
                         errorMessage = null,
                     )
                 }
@@ -459,7 +475,24 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     fun selectVideoConfig(config: CameraCapabilityInspector.VideoConfigCandidate) {
         if (_uiState.value.isRecording) return
         pipeline.selectVideoConfig(config)
-        _uiState.update { it.copy(selectedVideoConfig = config, fps = config.frameRate) }
+        _uiState.update { state ->
+            // 実機で発見(2026-07-20): シャッタースピードは映像fpsと無関係な独立設定なので、
+            // 遅いfps時代に選んだ/永続化されたシャッタースピードが残っていると、
+            // SENSOR_FRAME_DURATION>=SENSOR_EXPOSURE_TIMEの制約で新しいfpsを選んでも
+            // 実際のフレームレートがシャッタースピード側に食われる(60fpsを選んでも
+            // シャッタースピードが1/33s残っていれば実測33fpsにしかならない) —
+            // docs/VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md §2参照。
+            val clampedExposureTimeNanos = CaptureRangeClamper.clampExposureTimeNanosToFrameRate(
+                state.exposureTimeNanos, config.frameRate,
+            )
+            val shutterPresetStillFits = state.shutterPreset?.exposureTimeNanos() == clampedExposureTimeNanos
+            state.copy(
+                selectedVideoConfig = config,
+                fps = config.frameRate,
+                exposureTimeNanos = clampedExposureTimeNanos,
+                shutterPreset = state.shutterPreset.takeIf { shutterPresetStillFits },
+            )
+        }
         // **実機で発見**: every other setter in this file (setIso/setExposureTime/setAfAuto/
         // setWbAuto/setZoom/...) pushes its change into the *live* capture request via
         // updateCameraParams() right after updating uiState — this one didn't, so

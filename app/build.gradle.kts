@@ -16,6 +16,20 @@ android {
         versionCode = 1
         versionName = "0.1.0"
 
+        // 実機で発見(2026-07-20): インストール済みAPKのlastUpdateTimeが、調査中に
+        // 参照していた最新コミットの3分前だった — ソースとインストール済みAPKの不一致に
+        // 気づくのに手動でのadb dumpsys調査が必要だった。以後この手間を避けるため、
+        // ビルド時点のgit状態をAPKへ焼き込む(BuildInfo.logStartup()で起動時に出力)。
+        val gitSha = providers.exec {
+            commandLine("git", "rev-parse", "--short=12", "HEAD")
+        }.standardOutput.asText.get().trim()
+        val gitDirty = providers.exec {
+            commandLine("git", "status", "--porcelain")
+        }.standardOutput.asText.get().isNotBlank()
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+        buildConfigField("boolean", "GIT_DIRTY", "$gitDirty")
+        buildConfigField("long", "BUILD_TIME_MILLIS", "${System.currentTimeMillis()}L")
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // arm64-v8a is the sole shipping ABI: minSdk 29 has no meaningful 32-bit-only
@@ -95,6 +109,7 @@ android {
     buildFeatures {
         compose = true
         prefab = true // required to consume Oboe's prefab (CMake find_package) package
+        buildConfig = true
     }
 
     packaging {

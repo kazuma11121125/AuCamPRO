@@ -13,3 +13,7 @@ local.properties
 app/build/
 app/.cxx/
 /build-host-test/
+*.mp4
+*.png
+*.wav
+__pycache__/

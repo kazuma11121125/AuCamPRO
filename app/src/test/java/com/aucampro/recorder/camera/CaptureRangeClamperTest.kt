@@ -49,6 +49,23 @@ class CaptureRangeClamperTest {
     }
 
     @Test
+    fun clampExposureTimeNanosToFrameRate_tooSlowForNewFps_clampedDown() {
+        // Real-device case (2026-07-20): a persisted ~1/33s shutter speed survives a
+        // switch to a 60fps video config and must be pulled down to fit, or Camera2's
+        // frameDuration>=exposureTime constraint silently caps the actual fps at ~33.
+        val staleShutterNanos = 30_000_000L // ~1/33s
+        assertThat(CaptureRangeClamper.clampExposureTimeNanosToFrameRate(staleShutterNanos, 60))
+            .isEqualTo(16_666_666L)
+    }
+
+    @Test
+    fun clampExposureTimeNanosToFrameRate_alreadyFasterThanFrameRate_unchanged() {
+        val fastShutterNanos = 4_000_000L // 1/250s
+        assertThat(CaptureRangeClamper.clampExposureTimeNanosToFrameRate(fastShutterNanos, 30))
+            .isEqualTo(fastShutterNanos)
+    }
+
+    @Test
     fun frameDurationNanosForFps_computesAndClamps() {
         val frameDurationRange = 4_000_000L..100_000_000L
         assertThat(clamper.frameDurationNanosForFps(30, frameDurationRange)).isEqualTo(33_333_333L)

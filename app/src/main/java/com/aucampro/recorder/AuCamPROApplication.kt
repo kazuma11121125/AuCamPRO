@@ -33,8 +33,26 @@ class AuCamPROApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        logBuildInfo()
         container = AppContainer(this)
         installCrashSafeMuxerFinalizer()
+    }
+
+    /**
+     * Logs the exact source commit this APK was built from — see
+     * docs/VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md for why: mid-investigation, the
+     * installed APK's `lastUpdateTime` (via `adb shell dumpsys package`) turned out to
+     * predate the latest relevant commit by minutes, which took manual sleuthing to catch.
+     * `adb logcat | grep BuildInfo` now answers "does this APK actually contain fix X?"
+     * directly.
+     */
+    private fun logBuildInfo() {
+        Log.i(
+            "BuildInfo",
+            "versionName=${BuildConfig.VERSION_NAME} versionCode=${BuildConfig.VERSION_CODE} " +
+                "git=${BuildConfig.GIT_SHA}${if (BuildConfig.GIT_DIRTY) "-dirty" else ""} " +
+                "buildTime=${java.time.Instant.ofEpochMilli(BuildConfig.BUILD_TIME_MILLIS)}",
+        )
     }
 
     private fun installCrashSafeMuxerFinalizer() {

@@ -51,6 +51,22 @@ class CaptureRangeClamper(
     }
 
     companion object {
+        /**
+         * Camera2 always enforces `SENSOR_FRAME_DURATION >= SENSOR_EXPOSURE_TIME` — a
+         * shutter speed left over from a slower video fps selection silently caps the
+         * *actual* frame rate below whatever fps was just picked, independent of any
+         * per-device sensitivity/exposure range (so this needs no [CaptureRangeClamper]
+         * instance). Real-device-confirmed 2026-07-20: a persisted ~1/33s shutter speed
+         * forced every recording to ~33fps regardless of the selected 30/60fps target —
+         * see docs/VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md §2. Leaves
+         * [exposureTimeNanos] unchanged if it already fits [frameRate]'s frame period (a
+         * *faster* shutter than the frame period is always fine).
+         */
+        fun clampExposureTimeNanosToFrameRate(exposureTimeNanos: Long, frameRate: Int): Long {
+            val frameDurationNanos = 1_000_000_000L / frameRate
+            return minOf(exposureTimeNanos, frameDurationNanos)
+        }
+
         fun fromCharacteristics(characteristics: CameraCharacteristics): CaptureRangeClamper {
             val sensitivityRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
             val exposureTimeRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
