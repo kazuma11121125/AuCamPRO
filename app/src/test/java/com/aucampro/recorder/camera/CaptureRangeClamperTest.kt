@@ -66,6 +66,31 @@ class CaptureRangeClamperTest {
     }
 
     @Test
+    fun selectAeFpsRange_exactFixedRangeAvailable_preferred() {
+        val ranges = listOf(1 to 30, 30 to 30, 1 to 60, 30 to 60, 60 to 60)
+        assertThat(CaptureRangeClamper.selectAeFpsRange(ranges, 60)).isEqualTo(60 to 60)
+    }
+
+    @Test
+    fun selectAeFpsRange_noExactRange_narrowestContainingWins() {
+        // [30,60] is narrower (width 30) than [1,60] (width 59) and both contain 45.
+        val ranges = listOf(1 to 60, 30 to 60, 15 to 30)
+        assertThat(CaptureRangeClamper.selectAeFpsRange(ranges, 45)).isEqualTo(30 to 60)
+    }
+
+    @Test
+    fun selectAeFpsRange_tieOnWidth_higherLowerBoundWins() {
+        val ranges = listOf(20 to 50, 10 to 40) // both contain 30, both width 30
+        assertThat(CaptureRangeClamper.selectAeFpsRange(ranges, 30)).isEqualTo(20 to 50)
+    }
+
+    @Test
+    fun selectAeFpsRange_targetNotInAnyRange_returnsNull() {
+        val ranges = listOf(1 to 24, 24 to 24, 1 to 30, 30 to 30)
+        assertThat(CaptureRangeClamper.selectAeFpsRange(ranges, 60)).isNull()
+    }
+
+    @Test
     fun frameDurationNanosForFps_computesAndClamps() {
         val frameDurationRange = 4_000_000L..100_000_000L
         assertThat(clamper.frameDurationNanosForFps(30, frameDurationRange)).isEqualTo(33_333_333L)

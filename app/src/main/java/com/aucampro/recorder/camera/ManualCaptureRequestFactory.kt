@@ -6,6 +6,8 @@ import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.ColorSpaceTransform
 import android.hardware.camera2.params.MeteringRectangle
+import android.util.Log
+import android.util.Range
 
 /**
  * Applies §4.1's full-manual-control settings (exposure, WB, FPS-via-frame-duration,
@@ -39,11 +41,57 @@ class ManualCaptureRequestFactory(
         builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
         builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
         builder.set(CaptureRequest.SENSOR_SENSITIVITY, rangeClamper.clampSensitivity(iso))
-        builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, rangeClamper.clampExposureTimeNanos(exposureTimeNanos))
+        // 二重防御(docs/VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md §2): ViewModel側で
+        // fps変更時にシャッタースピードをクランプしているが、CaptureRequestを実際に組み立てる
+        // ここでも同じクランプを通す — 呼び出し元の経路が増えても
+        // frameDuration>=exposureTimeが常に成立することを保証する。
+        val clampedExposureTimeNanos = CaptureRangeClamper.clampExposureTimeNanosToFrameRate(exposureTimeNanos, fps)
+        builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, rangeClamper.clampExposureTimeNanos(clampedExposureTimeNanos))
         builder.set(
             CaptureRequest.SENSOR_FRAME_DURATION,
             rangeClamper.frameDurationNanosForFps(fps, frameDurationRangeNanos),
         )
+    }
+
+    /**
+     * `ExposureMode.AUTO`: `CONTROL_AE_MODE_ON` + a `CONTROL_AE_TARGET_FPS_RANGE` picked
+     * from the device's actually-advertised ranges (never an unconditional `Range(fps,
+     * fps)` — see [CaptureRangeClamper.selectAeFpsRange]'s doc). Does **not** set
+     * `SENSOR_SENSITIVITY`/`SENSOR_EXPOSURE_TIME`/`SENSOR_FRAME_DURATION` — those are
+     * `AE_MODE_OFF`-only keys and setting them alongside `AE_MODE_ON` would fight the ISP's
+     * own exposure control. No stale-value risk from a previous `applyManualExposure` call:
+     * [CameraSessionController.buildRequestBuilder] always starts from a fresh
+     * `createCaptureRequest(TEMPLATE_RECORD)` builder, never reuses one.
+     *
+     * [lock] is a real-device-comparison test hook (2026-07-20 investigation §4.3,
+     * AE_ON vs AE_ON+AE_LOCK vs AE_OFF under matched `CAM_CRITICAL` conditions) — always
+     * `false` from the normal `ExposureMode.AUTO` product path; only
+     * [CameraParams.debugAeLock] threads a `true` here, and only after real-device
+     * verification decides it's worth exposing as an actual mode.
+     */
+    fun applyAutoExposure(builder: CaptureRequest.Builder, targetFps: Int, lock: Boolean = false) {
+        builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+        builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, resolveAeFpsRange(targetFps))
+        builder.set(CaptureRequest.CONTROL_AE_LOCK, lock)
+    }
+
+    private fun resolveAeFpsRange(targetFps: Int): Range<Int> {
+        val available = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            ?.map { it.lower to it.upper }
+            ?: emptyList()
+        val selected = CaptureRangeClamper.selectAeFpsRange(available, targetFps)
+        Log.i(
+            "ManualCaptureRequestFactory",
+            "AE fps range: target=$targetFps available=$available selected=$selected",
+        )
+        // available being empty/not containing targetFps is unexpected (the fps picker
+        // should already only offer fps the encoder+device claim to support) but not a
+        // reason to crash a recording — fall back to the naive fixed range rather than
+        // erroring, same "graceful degradation over a hard failure" style as the
+        // histogram/photo-reader fallbacks elsewhere in this codebase.
+        val (lower, upper) = selected ?: (targetFps to targetFps)
+        return Range(lower, upper)
     }
 
     /** Base state (§4.1): MF locked at a fixed distance or continuous video AF. */

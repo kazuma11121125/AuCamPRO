@@ -106,6 +106,7 @@ fun IsoSlider(
     isoRange: IntRange,
     onIsoChange: (Int) -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     val logMin = kotlin.math.ln(isoRange.first.toFloat())
     val logMax = kotlin.math.ln(isoRange.last.toFloat())
@@ -123,6 +124,7 @@ fun IsoSlider(
             onIsoChange(snapped)
         },
         modifier = modifier,
+        enabled = enabled,
     )
 }
 
@@ -150,6 +152,7 @@ fun ShutterSlider(
     rangeNanos: LongRange,
     onValueChange: (Long) -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     val logMin = kotlin.math.ln(rangeNanos.first.toDouble())
     val logMax = kotlin.math.ln(rangeNanos.last.toDouble())
@@ -168,6 +171,7 @@ fun ShutterSlider(
             onValueChange(rawNanos.coerceIn(rangeNanos))
         },
         modifier = modifier,
+        enabled = enabled,
     )
 }
 

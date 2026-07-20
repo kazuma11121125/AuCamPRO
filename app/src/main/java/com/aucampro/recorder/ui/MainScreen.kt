@@ -902,13 +902,45 @@ private fun LazyListScope.cameraControlsPanelItems(
         }
     }
 
+    // Exposure mode — Auto/Manual (docs/VIDEO_FPS_STUTTER_INVESTIGATION_2026-07-20.md
+    // §3.3/§4). Auto disables (but doesn't clear) the ISO/Shutter sliders below —
+    // switching back to Manual restores exactly what was set before. Not changeable
+    // while recording, matching ViewModel.setExposureMode's own guard.
+    item {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 0.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = if (state.exposureMode == com.aucampro.recorder.camera.ExposureMode.AUTO) "EXPOSURE: AUTO" else "EXPOSURE: MANUAL",
+                color = OnSurfacePrimary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Switch(
+                checked = state.exposureMode == com.aucampro.recorder.camera.ExposureMode.AUTO,
+                enabled = !state.isRecording,
+                onCheckedChange = { checked ->
+                    viewModel.setExposureMode(
+                        if (checked) com.aucampro.recorder.camera.ExposureMode.AUTO
+                        else com.aucampro.recorder.camera.ExposureMode.MANUAL,
+                    )
+                },
+                colors = SwitchDefaults.colors(checkedThumbColor = Amber, checkedTrackColor = Amber.copy(alpha = 0.3f)),
+            )
+        }
+    }
+
     // ISO
     item {
+        val manualEnabled = state.exposureMode == com.aucampro.recorder.camera.ExposureMode.MANUAL
         if (caps != null) {
             IsoSlider(
                 iso = state.iso,
                 isoRange = caps.isoRange,
                 onIsoChange = viewModel::setIso,
+                enabled = manualEnabled,
             )
         } else {
             ManualControlSlider(
@@ -923,11 +955,13 @@ private fun LazyListScope.cameraControlsPanelItems(
 
     // Shutter
     item {
+        val manualEnabled = state.exposureMode == com.aucampro.recorder.camera.ExposureMode.MANUAL
         if (caps != null) {
             ShutterSlider(
                 exposureTimeNanos = state.exposureTimeNanos,
                 rangeNanos = caps.exposureTimeRangeNanos,
                 onValueChange = viewModel::setExposureTime,
+                enabled = manualEnabled,
             )
         } else {
             ManualControlSlider(
@@ -945,6 +979,7 @@ private fun LazyListScope.cameraControlsPanelItems(
         ShutterPresetRow(
             currentExposureNanos = state.exposureTimeNanos,
             onPresetSelect = { preset -> viewModel.setExposureTime(preset.exposureTimeNanos()) },
+            enabled = state.exposureMode == com.aucampro.recorder.camera.ExposureMode.MANUAL,
         )
     }
 
@@ -1064,6 +1099,7 @@ private fun WbPresetRow(
 private fun ShutterPresetRow(
     currentExposureNanos: Long,
     onPresetSelect: (com.aucampro.recorder.camera.CaptureRangeClamper.ShutterPreset) -> Unit,
+    enabled: Boolean = true,
 ) {
     val presets = com.aucampro.recorder.camera.CaptureRangeClamper.ShutterPreset.entries
     Row(
@@ -1085,9 +1121,9 @@ private fun ShutterPresetRow(
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(4.dp))
-                    .background(bg)
+                    .background(bg.copy(alpha = if (enabled) 1f else 0.4f))
                     .border(1.dp, if (isSelected) Amber else MaterialTheme.colorScheme.outline, RoundedCornerShape(4.dp))
-                    .clickable { onPresetSelect(preset) }
+                    .clickable(enabled = enabled) { onPresetSelect(preset) }
                     .padding(horizontal = 8.dp, vertical = 4.dp),
             ) {
                 Text(

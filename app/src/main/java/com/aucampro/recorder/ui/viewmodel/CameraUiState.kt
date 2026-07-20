@@ -6,6 +6,7 @@ import com.aucampro.recorder.audio.AudioDeviceRouter
 import com.aucampro.recorder.audio.AudioQuality
 import com.aucampro.recorder.camera.CameraCapabilityInspector
 import com.aucampro.recorder.camera.CaptureRangeClamper
+import com.aucampro.recorder.camera.ExposureMode
 import com.aucampro.recorder.camera.FocusController
 import com.aucampro.recorder.pipeline.RecordingPipeline
 import java.io.File
@@ -259,7 +260,14 @@ data class CameraUiState(
      * When false: Locked manual focus.
      */
     val afAuto: Boolean = true,
-    
+
+    /**
+     * [ExposureMode.MANUAL] = existing default (ISO/shutter sliders active,
+     * AE_MODE_OFF). Chosen before recording only — see
+     * [CameraControlViewModel.setExposureMode]'s guard.
+     */
+    val exposureMode: ExposureMode = ExposureMode.MANUAL,
+
     val manualWbGains: android.hardware.camera2.params.RggbChannelVector? = null,
 
     // ── Digital zoom ─────────────────────────────────────────────────────────
