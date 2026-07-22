@@ -29,6 +29,7 @@ import com.aucampro.recorder.encoder.HiResAudioSink
 import com.aucampro.recorder.encoder.VideoEncoder
 import com.aucampro.recorder.muxer.PtsClockDomain
 import com.aucampro.recorder.muxer.MuxerController
+import com.aucampro.recorder.ui.viewmodel.CaptureMode
 import com.aucampro.recorder.ui.viewmodel.StorageLocation
 import java.io.File
 import java.nio.ByteBuffer
@@ -579,6 +580,45 @@ class RecordingPipeline(private val context: Context) {
     private var nextVideoConfig: CameraCapabilityInspector.VideoConfigCandidate? = null
     private var storageLocation: StorageLocation = StorageLocation.AppPrivate
 
+    // docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2 — mirrors
+    // CameraControlViewModel/CameraUiState's CaptureMode (see setCaptureMode's doc for why
+    // this class needs to know it at all now). Defaults to Video, matching
+    // CameraUiState's own default, since this field only matters once a real CaptureMode
+    // is set — a pipeline that's never been told otherwise behaves exactly as it always
+    // has (Video-shaped session composition).
+    private var captureMode: CaptureMode = CaptureMode.Video
+
+    // Persistent MediaCodec InputSurface (Phase 2's core mechanism) — created lazily by
+    // the first startRecording() call in a given Video-CaptureMode session, then reused by
+    // every subsequent same-config recording in that session instead of minting a fresh
+    // Surface (which would force a CameraCaptureSession rebuild every time — the cost this
+    // design eliminates). Released (and nulled) only when CaptureMode leaves Video, the
+    // config it was built for changes, or the whole pipeline tears down — see
+    // [setCaptureMode]/[startRecording]/[stopAll].
+    private var persistentEncoderSurface: Surface? = null
+    // The exact VideoConfigCandidate [persistentEncoderSurface] was created for — a
+    // resolution/fps/mimeType change invalidates the Surface's buffer geometry, which
+    // Camera2 has no in-place update for (see the design doc's explicit "resolution/fps
+    // changes stay out of scope" carve-out), so this is compared against the live
+    // recordingVideoConfig on every [startRecording] to decide fast-path vs rebuild.
+    private var persistentEncoderConfig: CameraCapabilityInspector.VideoConfigCandidate? = null
+    // True only when [persistentEncoderSurface] is actually part of the *currently live*
+    // CameraCaptureSession's configured output set — false whenever that session gets torn
+    // down and rebuilt without it (see [stopPreviewSession]/[stopRecordingInternalLocked]),
+    // which forces [startRecording] back onto the full-reconfigure path rather than
+    // (incorrectly) assuming [CameraSessionController.updateRepeatingTargets] can target a
+    // Surface the live session was never actually configured with.
+    private var persistentSurfaceInSession: Boolean = false
+
+    // 2026-07-23 real-device finding (SO-51C): tracks whether [histogramReader]'s surface
+    // is actually part of the CURRENTLY live session's configured output set — needed
+    // because [reconfigureRecordingSurfacesLocked] (mid-recording screen-off/on) does
+    // *not* include it (see that method's doc for why, added after a real-device ANR),
+    // unlike every other session-build path in this class. Without this, the record-stop
+    // path's `updateRepeatingTargetsAwaitingDrain` could try to target a histogram Surface
+    // that particular rebuild silently dropped, throwing `IllegalArgumentException`.
+    private var histogramInSession: Boolean = false
+
     private enum class PipelineState { IDLE, PREVIEWING, RECORDING }
     private var pipelineState = PipelineState.IDLE
 
@@ -816,67 +856,129 @@ class RecordingPipeline(private val context: Context) {
             // proves out (see supportedVideoConfigs()'s 3840x2880 doc for why picking an
             // unproven size here is a real risk on this hardware), falling back to the
             // largest available JPEG size only if that exact one isn't offered.
+            //
+            // docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2: only built in
+            // Photo [captureMode] — Video mode has no photo-capture UI at all (§CaptureMode,
+            // confirmed via MainScreen — see that doc's "現状の確認" section), so this was
+            // previously a pointless extra full-res JPEG stream configured (though never
+            // repeating-targeted) during every Video-mode preview too; Video mode's own
+            // extra stream is [persistentEncoderSurface] instead (see below).
             photoReader?.close()
             photoHandlerThread?.quitSafely()
-            photoReader = pickPhotoOutputSize(characteristics)?.let { size ->
-                try {
-                    val ht = android.os.HandlerThread("PhotoCapture").apply { start() }
-                    photoHandlerThread = ht
-                    android.media.ImageReader.newInstance(
-                        size.width, size.height, android.graphics.ImageFormat.JPEG, 2,
-                    ).apply {
-                        setOnImageAvailableListener({ r ->
-                            val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
-                            try {
-                                val buffer = image.planes[0].buffer
-                                val bytes = ByteArray(buffer.remaining())
-                                buffer.get(bytes)
-                                savePhotoToMediaStore(bytes)
-                            } finally {
-                                image.close()
-                            }
-                        }, Handler(ht.looper))
+            photoReader = if (captureMode == CaptureMode.Photo) {
+                pickPhotoOutputSize(characteristics)?.let { size ->
+                    try {
+                        val ht = android.os.HandlerThread("PhotoCapture").apply { start() }
+                        photoHandlerThread = ht
+                        android.media.ImageReader.newInstance(
+                            size.width, size.height, android.graphics.ImageFormat.JPEG, 2,
+                        ).apply {
+                            setOnImageAvailableListener({ r ->
+                                val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+                                try {
+                                    val buffer = image.planes[0].buffer
+                                    val bytes = ByteArray(buffer.remaining())
+                                    buffer.get(bytes)
+                                    savePhotoToMediaStore(bytes)
+                                } finally {
+                                    image.close()
+                                }
+                            }, Handler(ht.looper))
+                        }
+                    } catch (e: Exception) {
+                        photoHandlerThread?.quitSafely()
+                        photoHandlerThread = null
+                        Log.w(TAG, "Photo reader creation failed, continuing without it", e)
+                        null
                     }
-                } catch (e: Exception) {
-                    photoHandlerThread?.quitSafely()
-                    photoHandlerThread = null
-                    Log.w(TAG, "Photo reader creation failed, continuing without it", e)
-                    null
                 }
+            } else {
+                null
             }
 
             // If no surface is available yet, defer actually opening the session.
             if (surface != null) {
-                val extraSurfaces = listOfNotNull(histogramReader?.surface, photoReader?.surface)
+                // docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2: session
+                // composition is now CaptureMode-dependent (Photo: Preview+Histogram+JPEG,
+                // unchanged; Video: Preview+Histogram+PersistentEncoderSurface, the encoder
+                // configured into the session but excluded from repeatingTargets — idle
+                // until a recording actually starts). [persistentEncoderSurface] is null
+                // until the first recording in this Video-mode session creates it (see
+                // [startRecording]); when present, folding it back into every subsequent
+                // preview-session rebuild here (lens switch, reattach, etc.) keeps the
+                // "already configured, just idle" resting state — and therefore the fast
+                // record-start path — intact across those rebuilds too, not just the
+                // record stop/start cycle itself.
+                val extraSurfaces = if (captureMode == CaptureMode.Video) {
+                    listOfNotNull(histogramReader?.surface, persistentEncoderSurface)
+                } else {
+                    listOfNotNull(histogramReader?.surface, photoReader?.surface)
+                }
                 try {
                     sessionController.startRepeating(
                         cameraId = lens.cameraId,
                         outputSurfaces = listOf(surface) + extraSurfaces,
                         // Histogram wants every preview frame (see its own doc) but the
-                        // photo reader must NOT be targeted by the repeating request — see
-                        // startRepeating()'s repeatingTargets doc for the real-device bug
-                        // this fixes (continuous full-res JPEG encoding of every frame).
+                        // photo reader / idle persistent encoder surface must NOT be
+                        // targeted by the repeating request — see startRepeating()'s
+                        // repeatingTargets doc for the real-device bug this fixes for the
+                        // photo reader (continuous full-res JPEG encoding of every frame);
+                        // the encoder surface needs the same exclusion so the camera isn't
+                        // streaming into it while no MediaCodec is bound/started to drain it
+                        // (see CameraSessionController.updateRepeatingTargets's doc for the
+                        // backpressure hazard that would cause).
                         repeatingTargets = listOfNotNull(surface, histogramReader?.surface),
                         requestFactory = requireNotNull(requestFactory),
                         params = params,
                     )
+                    persistentSurfaceInSession = captureMode == CaptureMode.Video && persistentEncoderSurface != null
+                    histogramInSession = histogramReader != null
                 } catch (e: Exception) {
                     if (extraSurfaces.isNotEmpty()) {
-                        // The full combo (preview + histogram + photo) isn't guaranteed
-                        // supported on every device — real-device testing already found
-                        // this exact camera rejects some concurrent stream combos outright
-                        // (see supportedVideoConfigs()'s 3840x2880 doc). Retry preview-only
-                        // rather than losing the whole preview over UI-assist/photo extras.
-                        Log.w(TAG, "Preview session with extra streams failed, retrying preview-only", e)
+                        // The full combo (preview + histogram + photo/encoder) isn't
+                        // guaranteed supported on every device — real-device testing
+                        // already found this exact camera rejects some concurrent stream
+                        // combos outright (see supportedVideoConfigs()'s 3840x2880 doc).
+                        Log.w(TAG, "Preview session with extra streams failed, retrying with reduced extras", e)
                         histogramReader?.close(); histogramReader = null
                         photoReader?.close(); photoReader = null
                         photoHandlerThread?.quitSafely(); photoHandlerThread = null
-                        sessionController.startRepeating(
-                            cameraId = lens.cameraId,
-                            outputSurfaces = listOf(surface),
-                            requestFactory = requireNotNull(requestFactory),
-                            params = params,
-                        )
+                        persistentSurfaceInSession = false
+                        histogramInSession = false
+                        // docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2
+                        // (2026-07-23 review finding): in Video mode, try Preview+Encoder
+                        // (dropping only Histogram) before giving up entirely — the
+                        // 3-stream combo may be what the HAL actually rejected, and losing
+                        // Histogram-only still keeps the encoder Surface configured into
+                        // *this* session, preserving the fast record-start path. Falling
+                        // straight to preview-only would drop the encoder Surface from the
+                        // session too, silently forcing every recording this session back
+                        // onto the full-rebuild path for no reason if the 2-way combo would
+                        // have worked fine.
+                        val retriedWithEncoder = captureMode == CaptureMode.Video && persistentEncoderSurface != null &&
+                            try {
+                                sessionController.startRepeating(
+                                    cameraId = lens.cameraId,
+                                    outputSurfaces = listOf(surface, requireNotNull(persistentEncoderSurface)),
+                                    repeatingTargets = listOf(surface),
+                                    requestFactory = requireNotNull(requestFactory),
+                                    params = params,
+                                )
+                                persistentSurfaceInSession = true
+                                true
+                            } catch (e2: Exception) {
+                                Log.w(TAG, "Preview+Encoder retry also failed, falling back to preview-only", e2)
+                                persistentSurfaceInSession = false
+                                false
+                            }
+                        if (!retriedWithEncoder) {
+                            sessionController.startRepeating(
+                                cameraId = lens.cameraId,
+                                outputSurfaces = listOf(surface),
+                                requestFactory = requireNotNull(requestFactory),
+                                params = params,
+                            )
+                        }
                     } else {
                         throw e
                     }
@@ -959,6 +1061,25 @@ class RecordingPipeline(private val context: Context) {
                 capabilityInspector.isVideoConfigSupported(it.mimeType, it.width, it.height, it.frameRate, it.bitrate)
             } ?: caps.videoConfig
 
+            // docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2 — decide once
+            // here whether this recording can reuse the already-configured persistent
+            // encoder Surface (fast path: CameraSessionController.updateRepeatingTargets
+            // only, no createCaptureSession) or needs a full session rebuild: the first
+            // recording since entering Video CaptureMode, a resolution/fps/mimeType change
+            // (recordingVideoConfig differs from what the existing Surface was built for —
+            // its buffer geometry can't be changed in place), or any intervening full
+            // session teardown that dropped it (persistentSurfaceInSession false — see that
+            // field's doc).
+            val needsFullSessionReconfigure =
+                persistentEncoderSurface == null || persistentEncoderConfig != recordingVideoConfig || !persistentSurfaceInSession
+            if (needsFullSessionReconfigure) {
+                persistentEncoderSurface?.release()
+                persistentEncoderSurface = MediaCodec.createPersistentInputSurface()
+                persistentEncoderConfig = recordingVideoConfig
+                persistentSurfaceInSession = false // set true only once reconfigureSession below actually succeeds
+            }
+            val encoderSurface = requireNotNull(persistentEncoderSurface)
+
             val takeTimestampMs = System.currentTimeMillis()
             // Milliseconds keep repeated takes started within the same minute/second from
             // resolving to the same single-file path.
@@ -1010,6 +1131,7 @@ class RecordingPipeline(private val context: Context) {
                         override fun onError(exception: Exception) =
                             onEncoderError("VideoEncoder", exception, onEvent)
                     },
+                    persistentInputSurface = encoderSurface,
                 )
             }
             videoEncoder = video
@@ -1067,21 +1189,41 @@ class RecordingPipeline(private val context: Context) {
             // before this call.
             audio.start()
 
-            // Reconfigure the session to include both the preview and the encoder's InputSurface.
-            // Camera2 requires a new CameraCaptureSession when the output surface set
-            // changes, causing a brief preview freeze — see
-            // CameraSessionController.reconfigureSession's doc for the real-device
-            // measurement of that freeze (~650-1000ms, mostly HAL-side session
-            // configuration, not reducible by this call alone) and why the device itself
-            // is deliberately kept open rather than closed+reopened here.
+            // docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2 — two paths:
+            //
+            // Full rebuild (first recording since entering Video mode, or a resolution/fps
+            // change): reconfigure the session to include preview + histogram + the
+            // persistent encoder Surface, same brief freeze as before this design
+            // (~650-1000ms — see CameraSessionController.reconfigureSession's doc). The
+            // Histogram stays *configured* (so it resumes the instant recording stops —
+            // LuminanceHistogramReader's doc's deliberate "freezes during recording"
+            // behavior) but is excluded from repeatingTargets here, same as the fast path.
+            //
+            // Fast path (repeat recording at the same config, Video mode unchanged): the
+            // persistent Surface is already part of the live session's configured output
+            // set, idle — just point the repeating request at it, no createCaptureSession.
+            // bind-before-target: `video.start()` above already ran before this call (see
+            // CameraSessionController.updateRepeatingTargets's doc for the backpressure
+            // hazard this ordering avoids). Self-healing: if the fast path fails for any
+            // reason (e.g. the session died out from under this class between preview and
+            // record-start — updateRepeatingTargets returns false rather than throwing, see
+            // its doc), fall back to the full rebuild rather than silently leaving the
+            // encoder untargeted, which would produce a recording with no video track.
             sessionMutex.withLock {
-                CameraSessionMetrics.traceAsync("AuCam:startRecording:cameraSessionReconfigure") {
-                    sessionController.reconfigureSession(
-                        cameraId = lens.cameraId,
-                        outputSurfaces = listOfNotNull(previewSurface, video.inputSurface),
-                        requestFactory = factory,
-                        params = currentParams,
-                    )
+                val usedFastPath = !needsFullSessionReconfigure &&
+                    sessionController.updateRepeatingTargets(listOfNotNull(previewSurface, video.inputSurface))
+                if (!usedFastPath) {
+                    CameraSessionMetrics.traceAsync("AuCam:startRecording:cameraSessionReconfigure") {
+                        sessionController.reconfigureSession(
+                            cameraId = lens.cameraId,
+                            outputSurfaces = listOfNotNull(previewSurface, histogramReader?.surface, video.inputSurface),
+                            repeatingTargets = listOfNotNull(previewSurface, video.inputSurface),
+                            requestFactory = factory,
+                            params = currentParams,
+                        )
+                    }
+                    persistentSurfaceInSession = true
+                    histogramInSession = histogramReader != null
                 }
             }
 
@@ -1101,9 +1243,19 @@ class RecordingPipeline(private val context: Context) {
     }
 
     /**
-     * Stops recording: drains all encoders, finalises muxers, then automatically restarts
-     * the preview-only session so the viewfinder stays live. Must be called from a
-     * coroutine; `awaitEndOfStream()` blocks until the VideoEncoder is fully drained.
+     * Stops recording: drains all encoders, finalises muxers, then returns with the
+     * pipeline already back in PREVIEWING (viewfinder live) whenever a preview surface is
+     * available — see [stopRecordingInternalLockedAsync]'s doc for how (Persistent Encoder
+     * Surface fast path, docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2)
+     * and when it instead falls back to a full session rebuild. **Callers must check
+     * [isPreviewing] after this returns rather than unconditionally calling [startPreview]
+     * again** — see that method's doc; a 2026-07-23 review caught that the old
+     * always-restart-preview contract silently destroyed the whole point of this design by
+     * paying a fresh `createCaptureSession` on every single stop regardless of the fast
+     * path succeeding.
+     *
+     * Must be called from a coroutine; `awaitEndOfStream()` blocks until the VideoEncoder
+     * is fully drained.
      *
      * The stop order follows docs/ARCHITECTURE.md §Phase4's stop-sequence rationale
      * (camera session stops, THEN encoders are drained — keeping the Audio tail ≤ 0.75s
@@ -1115,6 +1267,11 @@ class RecordingPipeline(private val context: Context) {
         if (pipelineState != PipelineState.RECORDING) return
         sessionMutex.withLock { stopRecordingInternalLockedAsync() }
     }
+
+    /** True once [stopRecording] (or a mid-recording error's cleanup) has returned the
+     * pipeline to a live, previewing state — see [stopRecording]'s doc for why callers
+     * must check this instead of assuming another [startPreview] call is always needed. */
+    fun isPreviewing(): Boolean = pipelineState == PipelineState.PREVIEWING
 
     /**
      * Called when the Activity's preview Surface becomes unavailable (backgrounded /
@@ -1183,16 +1340,67 @@ class RecordingPipeline(private val context: Context) {
         focusController = null
         audioEngineActive = false
         pipelineState = PipelineState.IDLE
+        // docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2 — its documented
+        // lifetime is "while Video CaptureMode is active", capped at "the whole pipeline's
+        // own lifetime" — this is that outer bound.
+        persistentEncoderSurface?.release()
+        persistentEncoderSurface = null
+        persistentEncoderConfig = null
+        persistentSurfaceInSession = false
         pipelineScope.cancel()
     }
 
     /**
      * Sets the video config to use for the next call to [startRecording].
      * No-op while recording.
+     *
+     * docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2: deliberately does
+     * **not** eagerly rebuild [persistentEncoderSurface] here even if [config] differs from
+     * the one it was built for — a resolution/fps change while merely PREVIEWING doesn't
+     * need the encoder surface at all yet. The mismatch is detected lazily at the next
+     * [startRecording] call (comparing against [persistentEncoderConfig]), which then pays
+     * one full session reconfigure to rebuild it — exactly the documented, in-scope
+     * fallback for resolution/fps changes, same as today's behavior, just detected in one
+     * more place.
      */
     fun selectVideoConfig(config: CameraCapabilityInspector.VideoConfigCandidate) {
         if (pipelineState == PipelineState.RECORDING) return
         nextVideoConfig = config
+    }
+
+    /**
+     * Switches session composition between Photo (Preview+Histogram+JPEG) and Video
+     * (Preview+Histogram+idle PersistentEncoderSurface) — see
+     * docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md. No-op if [mode] is unchanged
+     * or the pipeline is currently RECORDING (`CameraControlViewModel.setCaptureMode`
+     * already guards this at the UI layer; this is the second line of defense, same
+     * pattern as [selectVideoConfig]).
+     *
+     * Pays one full session reconfiguration when currently PREVIEWING (reuses
+     * [startPreview]'s own session-build logic rather than a bespoke partial-reconfigure
+     * path) — CaptureMode switches are rare and user-initiated, explicitly outside this
+     * design's latency-critical path (repeated record start/stop at a fixed composition).
+     *
+     * Leaving Video mode releases [persistentEncoderSurface] entirely (its documented
+     * lifetime is "while Video CaptureMode is active", not "for one recording") — the next
+     * time Video mode is entered, [startRecording] creates a fresh one on its first call,
+     * same as this pipeline's very first-ever recording.
+     */
+    @RequiresPermission(Manifest.permission.CAMERA)
+    suspend fun setCaptureMode(mode: CaptureMode) {
+        if (pipelineState == PipelineState.RECORDING) return
+        if (captureMode == mode) return
+        captureMode = mode
+        if (mode == CaptureMode.Photo) {
+            persistentEncoderSurface?.release()
+            persistentEncoderSurface = null
+            persistentEncoderConfig = null
+            persistentSurfaceInSession = false
+        }
+        val surface = previewSurface
+        if (pipelineState == PipelineState.PREVIEWING && surface != null) {
+            startPreview(surface, currentParams, targetCameraId = selectedLens?.cameraId)
+        }
     }
 
     /** Sets where recordings are saved. Takes effect on the next [startRecording]. */
@@ -1340,7 +1548,17 @@ class RecordingPipeline(private val context: Context) {
         // (just below) stops consuming from it; the underlying ring buffer harmlessly
         // wraps/overruns in the meantime, which does not affect this recording's already
         // in-flight drain/EOS sequence (see ensureAudioEngineStarted's doc for the split).
+        //
+        // Unlike [stopRecordingInternalLockedAsync]'s interactive path, this (non-suspend)
+        // method always fully tears the session down rather than trying the Persistent
+        // Encoder Surface fast path — it only runs from [stopAll] (unconditional pipeline
+        // teardown) and [startRecording]'s own exception handler (an already-exceptional
+        // path), neither of which benefits from the extra complexity of a drain-aware
+        // partial stop. [persistentSurfaceInSession] must be reset to false since the
+        // session it referred to no longer exists.
         sessionController.stop()
+        persistentSurfaceInSession = false
+        histogramInSession = false
 
         videoEncoder?.let { encoder ->
             encoder.signalEndOfStream()
@@ -1401,12 +1619,58 @@ class RecordingPipeline(private val context: Context) {
      * (main) confinement elsewhere in this class (e.g. [selectVideoConfig]'s unguarded
      * `pipelineState` read), so this keeps that invariant intact instead of trading one race
      * for another.
+     *
+     * docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2 (2026-07-23 revision):
+     * no longer unconditionally calls [CameraSessionController.stop] — that used to close
+     * the whole session/device on *every* stop, which [CameraControlViewModel.stopRecording]
+     * then had to pay for again via a fresh [startPreview] (device reopen +
+     * `createCaptureSession`), defeating this design's entire point (the fast path only
+     * matters if the session actually survives the stop/start cycle). Instead:
+     * 1. Drop the encoder from the repeating request — [drainedSafely] below — using the
+     *    drain-aware controller methods so [VideoEncoder.signalEndOfStream] isn't racing
+     *    a trailing in-flight frame from the just-superseded sequence (see
+     *    [CameraSessionController.updateRepeatingTargetsAwaitingDrain]'s doc).
+     * 2. If that can't be confirmed (timeout, or no valid non-empty target list to restore
+     *    — e.g. backgrounded with no preview surface and no histogram reader), fall back to
+     *    the old unconditional [CameraSessionController.stop] — safe, just pays the full
+     *    teardown cost this one time — and [restorePreviewAfterFallbackStop] rebuilds a
+     *    fresh preview session afterward so the caller still ends up PREVIEWING (not IDLE)
+     *    whenever a preview surface is available, same external contract either way.
      */
     private suspend fun stopRecordingInternalLockedAsync() {
         metricsDumpJob?.cancel()
         metricsDumpJob = null
         CameraSessionMetrics.abortDanglingRecordingSpans(CameraSessionMetrics.activeRecordingAttemptId())
-        sessionController.stop()
+
+        // untarget-before-unbind (design doc's backpressure/ordering section): drop the
+        // encoder from the live repeating request — and confirm its previous
+        // (encoder-including) sequence has actually drained — BEFORE telling VideoEncoder
+        // to signalEndOfStream below. Only re-targets the histogram Surface if
+        // [histogramInSession] confirms it's actually part of the *live* session's
+        // configured output set — see that field's doc: a mid-recording
+        // reconfigureRecordingSurfacesLocked() call (screen-off/on) deliberately excludes
+        // it (2026-07-23 real-device finding), so blindly including
+        // `histogramReader?.surface` here regardless could target a Surface the current
+        // session was never actually configured with.
+        val restoredTargets = listOfNotNull(previewSurface, histogramReader?.surface.takeIf { histogramInSession })
+        val drainedSafely = if (restoredTargets.isEmpty()) {
+            // No valid non-empty target list to replace the repeating request with
+            // (backgrounded recording with no preview surface, on a device where the
+            // histogram reader also failed to create) — setRepeatingRequest with zero
+            // targets throws immediately, so stop the repeating pipeline outright instead.
+            sessionController.stopRepeatingAwaitingDrain()
+        } else {
+            sessionController.updateRepeatingTargetsAwaitingDrain(restoredTargets)
+        }
+        if (!drainedSafely) {
+            // Safety-first fallback: couldn't confirm the previous (encoder-including)
+            // sequence has stopped delivering frames — abortCaptures()+close() is the one
+            // Camera2 API that *guarantees* that unconditionally, matching this stop
+            // sequence's pre-Phase-2 behavior exactly for this one (rare) case.
+            sessionController.stop()
+            persistentSurfaceInSession = false
+            histogramInSession = false
+        }
 
         val video = videoEncoder
         val audio = audioEncoder
@@ -1432,8 +1696,56 @@ class RecordingPipeline(private val context: Context) {
         audioEncoder = null
         muxerController = null
         hiResAudioSink = null
-        pipelineState = PipelineState.IDLE
         currentOutputDir = null
+
+        if (drainedSafely) {
+            pipelineState = PipelineState.PREVIEWING
+        } else {
+            // sessionController.stop() above already fully tore the session down — rebuild
+            // a fresh one (same composition logic startPreview() uses) so this method's
+            // caller still ends up PREVIEWING whenever a preview surface is available,
+            // regardless of which of the two paths above was taken.
+            restorePreviewAfterFallbackStop()
+        }
+    }
+
+    /**
+     * Rebuilds a plain Video-mode preview session (Preview + Histogram + the persistent
+     * encoder Surface, if one still exists) after [stopRecordingInternalLockedAsync]'s
+     * drain-confirmation fallback fully tore the previous session down — see that method's
+     * doc. Deliberately a much smaller rebuild than [startPreview] itself: the lens,
+     * capabilities, focus controller, capture-result listener, and histogram/photo readers
+     * are all still valid (nothing about *them* changed, only the session died) — this only
+     * needs to reopen the camera and re-establish the repeating request. Leaves
+     * [pipelineState] at IDLE (not PREVIEWING) if there is no [previewSurface] to build
+     * against (backgrounded) or the rebuild itself fails — matching this pipeline's other
+     * "no surface yet, stay IDLE" points (e.g. [startPreview]'s own doc).
+     */
+    @RequiresPermission(Manifest.permission.CAMERA)
+    private suspend fun restorePreviewAfterFallbackStop() {
+        val lens = selectedLens
+        val factory = requestFactory
+        val surface = previewSurface
+        if (lens == null || factory == null || surface == null) {
+            pipelineState = PipelineState.IDLE
+            return
+        }
+        try {
+            val extras = listOfNotNull(histogramReader?.surface, persistentEncoderSurface)
+            sessionController.startRepeating(
+                cameraId = lens.cameraId,
+                outputSurfaces = listOf(surface) + extras,
+                repeatingTargets = listOfNotNull(surface, histogramReader?.surface),
+                requestFactory = factory,
+                params = currentParams,
+            )
+            persistentSurfaceInSession = persistentEncoderSurface != null
+            histogramInSession = histogramReader != null
+            pipelineState = PipelineState.PREVIEWING
+        } catch (e: Exception) {
+            Log.e(TAG, "restorePreviewAfterFallbackStop failed", e)
+            pipelineState = PipelineState.IDLE
+        }
     }
 
     /**
@@ -1626,6 +1938,11 @@ class RecordingPipeline(private val context: Context) {
     private fun stopPreviewSession() {
         if (pipelineState == PipelineState.PREVIEWING) {
             sessionController.stop()
+            // The persistent encoder Surface (if any) is not part of any live session
+            // anymore — does not release the Surface itself (see persistentEncoderSurface's
+            // doc; only setCaptureMode/stopAll do that), just this bookkeeping bit.
+            persistentSurfaceInSession = false
+            histogramInSession = false
             pipelineState = PipelineState.IDLE
         }
     }
@@ -1659,12 +1976,30 @@ class RecordingPipeline(private val context: Context) {
         val lens = selectedLens ?: return
         val factory = requestFactory ?: return
         try {
+            // 2026-07-23 real-device finding (SO-51C): this method's earlier revision
+            // added histogramReader's surface to this reconfigure (reasoning: keep the
+            // stop-time updateRepeatingTargetsAwaitingDrain target list valid). On-device,
+            // a burst of rapid Activity relaunches mid-recording (config-change storm)
+            // drove repeated calls through exactly this method, and one of the resulting
+            // createCaptureSession attempts appears to have never called back at all —
+            // wedging sessionMutex forever (see CAMERA_OPERATION_TIMEOUT_MS's doc for the
+            // general timeout fix). Reverted to the plain 2-surface combo (Preview +
+            // Encoder) this method used before Phase 2 — the one this exact hardware has
+            // actually proven stable — rather than risk a 3rd stream on what this method's
+            // own doc already flags as an "実機未検証" path even before Phase 2. This is a
+            // narrower, evidence-driven exception to Phase 2's Video-mode composition
+            // (Preview+Histogram+Encoder) — see [histogramInSession]'s doc: it's kept in
+            // sync so [stopRecordingInternalLockedAsync] correctly stops trying to restore
+            // Histogram after a recording that went through *this specific* reconfigure,
+            // rather than crashing on an unconfigured target.
             sessionController.reconfigureSession(
                 cameraId = lens.cameraId,
                 outputSurfaces = listOfNotNull(previewSurface, video.inputSurface),
                 requestFactory = factory,
                 params = currentParams,
             )
+            persistentSurfaceInSession = true
+            histogramInSession = false
             Log.i(TAG, "Recording session reconfigured (preview=${previewSurface != null})")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to reconfigure recording session surfaces", e)

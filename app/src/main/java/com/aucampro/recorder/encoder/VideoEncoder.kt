@@ -37,6 +37,14 @@ class VideoEncoder(
     bitrate: Int,
     private val ptsClockDomain: PtsClockDomain,
     private val callback: Callback,
+    /** docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2 — when non-null, this
+     * `MediaCodec` binds to a `Surface` created once via `MediaCodec.createPersistentInputSurface()`
+     * and owned/reused across recordings by [com.aucampro.recorder.pipeline.RecordingPipeline]
+     * (`codec.setInputSurface()`) instead of minting its own per-recording `Surface` via
+     * `codec.createInputSurface()`. [inputSurface] is that same instance either way — callers
+     * don't need to branch on which path was taken. [stop] must not release a Surface it
+     * doesn't own; see [ownsInputSurface]. */
+    private val persistentInputSurface: Surface? = null,
     /** docs/CAMERA_SESSION_LATENCY_2026-07-21.md Phase 1 — captured once here, at
      * construction time, rather than read dynamically from
      * `CameraSessionMetrics.activeRecordingAttemptId()` inside [onOutputBufferAvailable]:
@@ -58,6 +66,11 @@ class VideoEncoder(
     private val codec: MediaCodec = MediaCodec.createEncoderByType(mimeType)
     val inputSurface: Surface
     private val eosLatch = CountDownLatch(1)
+
+    /** False when [inputSurface] is a caller-owned persistent Surface ([persistentInputSurface])
+     * whose lifetime spans multiple recordings — [stop] must not release it, only the
+     * per-recording `codec` itself. See [persistentInputSurface]'s doc. */
+    private val ownsInputSurface: Boolean = persistentInputSurface == null
 
     // Reused across every onOutputBufferAvailable call instead of allocating a fresh
     // MediaCodec.BufferInfo per frame (~60/frame/sec at 60fps recording) — real-device
@@ -158,7 +171,17 @@ class VideoEncoder(
         // to fail.
         try {
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            inputSurface = codec.createInputSurface()
+            if (persistentInputSurface != null) {
+                // docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2 — binds this
+                // fresh MediaCodec instance to a Surface created once (outside this class)
+                // via MediaCodec.createPersistentInputSurface(); the Surface's identity
+                // (and therefore the CameraCaptureSession's configured output set) stays
+                // unchanged across every recording that reuses it.
+                codec.setInputSurface(persistentInputSurface)
+                inputSurface = persistentInputSurface
+            } else {
+                inputSurface = codec.createInputSurface()
+            }
         } catch (e: Exception) {
             codec.release()
             throw e
@@ -185,6 +208,9 @@ class VideoEncoder(
     fun stop() {
         codec.stop()
         codec.release()
-        inputSurface.release()
+        // Persistent surfaces outlive this one recording's codec — see
+        // [persistentInputSurface]'s/[ownsInputSurface]'s docs; the owner
+        // (RecordingPipeline) releases it once, when Video CaptureMode itself is exited.
+        if (ownsInputSurface) inputSurface.release()
     }
 }

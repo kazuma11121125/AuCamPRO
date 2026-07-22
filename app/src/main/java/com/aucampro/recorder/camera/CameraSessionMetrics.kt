@@ -52,7 +52,16 @@ object CameraSessionMetrics {
     private const val CAPTURE_CALLBACK_TRACE_SAMPLE_EVERY = 30L
     private const val DUMP_INTERVAL_MS = 5_000L
 
-    enum class RepeatingRequestReason { START_REPEATING, SESSION_RECONFIGURE, PARAM_UPDATE, FOCUS_REQUEST }
+    enum class RepeatingRequestReason {
+        START_REPEATING, SESSION_RECONFIGURE, PARAM_UPDATE, FOCUS_REQUEST,
+        // docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2 — the
+        // repeatingTargets-only reissue (CameraSessionController.updateRepeatingTargets)
+        // used to add/remove the persistent encoder Surface on record start/stop without
+        // paying createCaptureSession. Tracked separately from SESSION_RECONFIGURE so the
+        // real-device feasibility pass can confirm this path is actually being taken
+        // instead of silently falling back to a full reconfigure every time.
+        REPEATING_TARGETS_UPDATE,
+    }
 
     // ── Counters (Phase 1: observation only, nothing here changes any camera behavior) ──────
     private val openCameraCount = AtomicLong(0)

@@ -547,18 +547,30 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
                         stopRecordingJobs()
                         stopRecordingService()
                         if (event.sessionStopped) {
-                            // The pipeline already tore the camera session down (mid-recording
-                            // encoder error, or a failure after the session was reconfigured
-                            // for recording) — restart preview the same way a normal
-                            // stopRecording() does, or the viewfinder is left black/frozen.
-                            // pipeline.startPreview() is suspend, and this `event ->` lambda
-                            // is a plain callback (not a coroutine body), hence the nested launch.
+                            // The pipeline's own cleanup (RecordingPipeline.onEncoderError →
+                            // stopRecording()) already ran by the time this event fires — see
+                            // Event.Failed's doc. docs/PERSISTENT_ENCODER_SURFACE_DESIGN_
+                            // 2026-07-21.md Phase 2 (2026-07-23 review finding): that cleanup
+                            // now often keeps the session alive and lands back in PREVIEWING
+                            // on its own (same fast/fallback split as the normal stopRecording()
+                            // path above), so check [RecordingPipeline.isPreviewing] instead of
+                            // unconditionally calling [startPreview] again — only the rare
+                            // full-teardown fallback actually needs a fresh one, or the
+                            // viewfinder would otherwise pay a redundant session rebuild (or,
+                            // worse, briefly show black) on every mid-recording error.
                             _uiState.update { it.copy(errorMessage = "録画エラー: ${event.message}") }
-                            viewModelScope.launch {
-                                val surface = previewSurface
-                                val caps = surface?.let { pipeline.startPreview(it, _uiState.value.toCameraParams()) }
-                                _uiState.update {
-                                    it.copy(recordingState = if (caps != null) RecordingUiState.Previewing else RecordingUiState.Idle)
+                            if (pipeline.isPreviewing()) {
+                                _uiState.update { it.copy(recordingState = RecordingUiState.Previewing) }
+                            } else {
+                                // pipeline.startPreview() is suspend, and this `event ->`
+                                // lambda is a plain callback (not a coroutine body), hence
+                                // the nested launch.
+                                viewModelScope.launch {
+                                    val surface = previewSurface
+                                    val caps = surface?.let { pipeline.startPreview(it, _uiState.value.toCameraParams()) }
+                                    _uiState.update {
+                                        it.copy(recordingState = if (caps != null) RecordingUiState.Previewing else RecordingUiState.Idle)
+                                    }
                                 }
                             }
                         } else {
@@ -587,22 +599,36 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
             stopRecordingJobs()
             pipeline.stopRecording()
             stopRecordingService()
-            val surface = previewSurface
-            if (surface != null) {
-                val caps = pipeline.startPreview(surface, _uiState.value.toCameraParams())
-                _uiState.update { state ->
-                    state.copy(
-                        recordingState = if (caps != null) RecordingUiState.Previewing else RecordingUiState.Idle,
-                    )
-                }
-                _meterState.update {
-                    it.copy(
-                        peakDbL = -120f, peakDbR = -120f, rmsDbL = -120f, rmsDbR = -120f,
-                        isClippingHeldL = false, isClippingHeldR = false,
-                    )
-                }
+            // docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2 (2026-07-23
+            // review finding): pipeline.stopRecording() now keeps the camera session alive
+            // and returns already back in PREVIEWING whenever possible (see
+            // RecordingPipeline.stopRecording's doc) — calling pipeline.startPreview()
+            // again here unconditionally used to force a full session rebuild
+            // (device close + reopen + createCaptureSession) on *every single stop*,
+            // defeating this design's entire point. [RecordingPipeline.isPreviewing] tells
+            // us whether the fast path landed; only the rare fallback case (drain
+            // confirmation timed out, or no valid target list) actually needs a fresh
+            // [startPreview] call.
+            if (pipeline.isPreviewing()) {
+                _uiState.update { it.copy(recordingState = RecordingUiState.Previewing) }
             } else {
-                _uiState.update { it.copy(recordingState = RecordingUiState.Idle) }
+                val surface = previewSurface
+                if (surface != null) {
+                    val caps = pipeline.startPreview(surface, _uiState.value.toCameraParams())
+                    _uiState.update { state ->
+                        state.copy(
+                            recordingState = if (caps != null) RecordingUiState.Previewing else RecordingUiState.Idle,
+                        )
+                    }
+                } else {
+                    _uiState.update { it.copy(recordingState = RecordingUiState.Idle) }
+                }
+            }
+            _meterState.update {
+                it.copy(
+                    peakDbL = -120f, peakDbR = -120f, rmsDbL = -120f, rmsDbR = -120f,
+                    isClippingHeldL = false, isClippingHeldR = false,
+                )
             }
         }
     }
@@ -679,10 +705,43 @@ class CameraControlViewModel(app: Application) : AndroidViewModel(app) {
     /** Switches which action the shutter performs (§CaptureMode's doc). Disallowed
      * mid-recording — MainScreen's mode toggle already greys itself out via
      * [CameraUiState.isRecording], this is the second line of defense so a stray call
-     * can't switch a live take out from under the hardware key. */
+     * can't switch a live take out from under the hardware key.
+     *
+     * docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2 (2026-07-23 review
+     * finding): now also calls [RecordingPipeline.setCaptureMode], which — unlike this
+     * field flip — is `suspend` and may pay one real session reconfigure (see its doc).
+     * While that's in flight, `recordingState` is bumped to [RecordingUiState.StartingPreview]
+     * (the same transient state [attachPreviewSurface]/[switchLens] already use for "session
+     * being rebuilt, REC not yet valid") specifically so [CameraUiState.canStartRecording]
+     * (which requires exactly `Previewing`) disables REC for that window — `sessionMutex`
+     * inside the pipeline already serializes the actual camera calls either way, but a REC
+     * press landing mid-switch before this fix could plausibly start recording against a
+     * mode the UI had already flipped away from.
+     */
+    @Suppress("MissingPermission") // only reachable once MainScreen (and PermissionGate) is composed
     fun setCaptureMode(mode: CaptureMode) {
-        if (_uiState.value.isRecording) return
-        _uiState.update { it.copy(captureMode = mode) }
+        val previousState = _uiState.value
+        if (previousState.isRecording) return
+        if (previousState.captureMode == mode) return
+        val wasPreviewing = previousState.recordingState == RecordingUiState.Previewing
+        _uiState.update {
+            it.copy(
+                captureMode = mode,
+                recordingState = if (wasPreviewing) RecordingUiState.StartingPreview else it.recordingState,
+            )
+        }
+        viewModelScope.launch {
+            pipeline.setCaptureMode(mode)
+            if (wasPreviewing) {
+                _uiState.update {
+                    if (it.recordingState == RecordingUiState.StartingPreview) {
+                        it.copy(recordingState = RecordingUiState.Previewing)
+                    } else {
+                        it
+                    }
+                }
+            }
+        }
     }
 
     /**

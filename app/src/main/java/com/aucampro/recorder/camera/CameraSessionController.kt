@@ -20,7 +20,10 @@ import androidx.annotation.RequiresPermission
 import java.util.concurrent.Executor
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Owns the real `CameraDevice`/`CameraCaptureSession` lifecycle (§4.1).
@@ -40,6 +43,23 @@ class CameraSessionController(private val cameraManager: CameraManager) {
 
     private companion object {
         const val TAG = "CameraSessionController"
+
+        // 2026-07-23 real-device finding (SO-51C): during Phase 2 feasibility testing, a
+        // burst of rapid Activity relaunches (config-change storm, e.g. from an unstable
+        // wireless-charging placement) mid-recording triggered repeated
+        // reconfigureRecordingSurfacesLocked() calls; one of the resulting
+        // createCaptureSession attempts appears to have never called back
+        // (onConfigured/onConfigureFailed) at all. Since [openCamera]/[createSession] used
+        // a bare suspendCancellableCoroutine with no timeout, that left the coroutine
+        // parked forever — and since both run inside RecordingPipeline's `sessionMutex
+        // .withLock`, the mutex itself stayed locked forever too, wedging every subsequent
+        // camera operation (including the REC-stop path) — an ANR, not a crash, since the
+        // main thread's Looper itself kept running fine; only camera-mutex-guarded work
+        // was stuck. This timeout bounds that wait so a HAL that never calls back produces
+        // a normal (catchable) failure instead of a permanent app-wide wedge. 5s is
+        // generously above every measured createCaptureSession cost (Phase 1: 205-483ms)
+        // while still being well inside what a user would tolerate/notice as "frozen."
+        const val CAMERA_OPERATION_TIMEOUT_MS = 5_000L
     }
 
     /** Per-frame result listener for FocusController integration. */
@@ -59,6 +79,20 @@ class CameraSessionController(private val cameraManager: CameraManager) {
     private var activeSurfaces: List<Surface> = emptyList()
     private var activeRequestFactory: ManualCaptureRequestFactory? = null
     private var activeParams: CameraParams? = null
+
+    // docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2 — the callback object
+    // passed to the MOST RECENT successful setRepeatingRequest call, whichever method made
+    // it (startRepeating/reconfigureSession/updateCaptureParams/updateRepeatingTargets/
+    // submitSingleRequest — all go through [issueRepeatingRequest] now). Camera2 invokes
+    // onCaptureSequenceCompleted/onCaptureSequenceAborted on *that specific callback
+    // object* once its sequence is superseded — tracking "whichever one is current"
+    // (rather than only the one from a specific method) is what lets
+    // [updateRepeatingTargetsAwaitingDrain]/[stopRepeatingAwaitingDrain] correctly await
+    // the *actually currently active* sequence's drain, even if e.g. a slider drag
+    // (updateCaptureParams) reissued the repeating request one or more times after the
+    // encoder was added — awaiting a stale reference would await an already-completed
+    // event that will never fire again, timing out every time.
+    private var activeRepeatingCallback: RepeatingCallback? = null
 
     /** Optional: set before [startRepeating] to receive per-frame CaptureResult callbacks. */
     var captureResultListener: CaptureResultListener? = null
@@ -111,10 +145,7 @@ class CameraSessionController(private val cameraManager: CameraManager) {
         activeParams = params
 
         val request = buildRequest(cameraDevice, requestFactory, params)
-        CameraSessionMetrics.traceSync("AuCam:setRepeatingRequest") {
-            captureSession.setRepeatingRequest(request, makeCaptureCallback(), callbackHandler)
-        }
-        CameraSessionMetrics.onSetRepeatingRequest(CameraSessionMetrics.RepeatingRequestReason.START_REPEATING)
+        issueRepeatingRequest(captureSession, request, CameraSessionMetrics.RepeatingRequestReason.START_REPEATING)
     }
 
     /**
@@ -195,10 +226,7 @@ class CameraSessionController(private val cameraManager: CameraManager) {
         activeParams = params
 
         val request = buildRequest(existingDevice, requestFactory, params)
-        CameraSessionMetrics.traceSync("AuCam:setRepeatingRequest") {
-            captureSession.setRepeatingRequest(request, makeCaptureCallback(), callbackHandler)
-        }
-        CameraSessionMetrics.onSetRepeatingRequest(CameraSessionMetrics.RepeatingRequestReason.SESSION_RECONFIGURE)
+        issueRepeatingRequest(captureSession, request, CameraSessionMetrics.RepeatingRequestReason.SESSION_RECONFIGURE)
         CameraSessionMetrics.logStage(metricsAttemptId, "T6_setRepeatingRequestComplete")
     }
 
@@ -231,13 +259,148 @@ class CameraSessionController(private val cameraManager: CameraManager) {
         activeParams = params
         try {
             val request = buildRequest(currentDevice, factory, params)
-            CameraSessionMetrics.traceSync("AuCam:setRepeatingRequest") {
-                currentSession.setRepeatingRequest(request, makeCaptureCallback(), callbackHandler)
-            }
-            CameraSessionMetrics.onSetRepeatingRequest(CameraSessionMetrics.RepeatingRequestReason.PARAM_UPDATE)
+            issueRepeatingRequest(currentSession, request, CameraSessionMetrics.RepeatingRequestReason.PARAM_UPDATE)
         } catch (e: IllegalStateException) {
             Log.w(TAG, "updateCaptureParams: session/device closed mid-call, ignoring", e)
         }
+    }
+
+    /**
+     * Reissues the repeating request against [newTargets] **without** touching the
+     * `CameraCaptureSession`'s configured output surface set — no `abortCaptures()`, no
+     * `createCaptureSession()`. Every surface in [newTargets] must already be part of the
+     * surface set the session was last configured with (via [startRepeating] or
+     * [reconfigureSession]'s `outputSurfaces`); Camera2 throws `IllegalArgumentException`
+     * from `createCaptureRequest`/`setRepeatingRequest` otherwise — callers are responsible
+     * for keeping that invariant (see docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md).
+     * That invariant violation is a caller bug, not a runtime condition to swallow, so
+     * (unlike the `IllegalStateException` guard below) it is deliberately left to propagate.
+     *
+     * This is the fast path that design doc's Phase 2 adds: adding/removing the
+     * (session-resident but idle-until-targeted) persistent encoder Surface from the live
+     * repeating request on record start/stop, instead of paying [reconfigureSession]'s
+     * ~200-480ms `createCaptureSession` cost every cycle.
+     *
+     * **Transactional** (2026-07-23 review finding): [activeSurfaces] is only mutated once
+     * `setRepeatingRequest` has actually been accepted — a mid-call
+     * `IllegalStateException` (session/device closed) rolls it back to its previous value
+     * rather than leaving this class's bookkeeping claiming a surface set that was never
+     * actually applied at the HAL level, which would have silently corrupted every
+     * subsequent [updateCaptureParams]/[submitSingleRequest] request built from it.
+     *
+     * Returns `true` iff the repeating request was actually reissued — `false` for "no
+     * session active" (a real no-op) as well as a caught `IllegalStateException` (a failed
+     * attempt) — callers must not treat either as a silent success; see
+     * [updateRepeatingTargetsAwaitingDrain]'s doc for why this specifically matters at
+     * record-stop time.
+     */
+    fun updateRepeatingTargets(newTargets: List<Surface>): Boolean {
+        val currentSession = session ?: return false
+        val currentDevice = device ?: return false
+        val factory = activeRequestFactory ?: return false
+        val params = activeParams ?: return false
+
+        val previousSurfaces = activeSurfaces
+        activeSurfaces = newTargets
+        return try {
+            val request = buildRequest(currentDevice, factory, params)
+            issueRepeatingRequest(currentSession, request, CameraSessionMetrics.RepeatingRequestReason.REPEATING_TARGETS_UPDATE)
+            true
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "updateRepeatingTargets: session/device closed mid-call, rolling back", e)
+            activeSurfaces = previousSurfaces
+            false
+        }
+    }
+
+    /**
+     * [updateRepeatingTargets] plus a drain guarantee: suspends until the repeating
+     * sequence this call *supersedes* (i.e. whatever [activeRepeatingCallback] was before
+     * this call) has been confirmed by the framework as either fully completed
+     * (`onCaptureSequenceCompleted`) or aborted (`onCaptureSequenceAborted`) — meaning no
+     * further frames from that PREVIOUS sequence can still be in flight toward any Surface
+     * it was targeting.
+     *
+     * **Why this exists** (2026-07-23 review finding, docs/
+     * PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2): plain
+     * [updateRepeatingTargets] only guarantees the *new* repeating request has been
+     * accepted — Camera2 does not guarantee the old one's already-in-flight captures (sensor
+     * exposure already started, HAL already processing) stop delivering to their surfaces
+     * the instant a replacement is set; a handful can still land afterward. At record-stop,
+     * the surface being dropped from repeating is the encoder's — if
+     * `VideoEncoder.signalEndOfStream()` races one of those trailing frames, the encoder's
+     * internal buffer source (which is explicitly designed to tolerate an asynchronous
+     * external producer like Camera2, but only up to the declared end of input) can receive
+     * a frame after being told there won't be one, which is undefined/unsafe. The
+     * pre-Phase-2 stop sequence avoided this for free because `stop()`'s `abortCaptures()`
+     * *does* guarantee immediate discard of all in-flight captures — this method restores
+     * an equivalent guarantee for the fast (no session teardown) path by waiting for the
+     * framework's own completion signal instead.
+     *
+     * Returns `false` (without rolling back [activeSurfaces] — the new repeating request
+     * *did* take effect, only the drain confirmation didn't arrive in time) if the previous
+     * sequence doesn't drain within [timeoutMs]. **Callers must treat `false` as "cannot
+     * guarantee it's safe to signal end-of-stream yet"** and fall back to a harder stop
+     * (e.g. this class's [stop], whose `abortCaptures()` gives the same guarantee
+     * unconditionally) rather than proceeding — see this method's own reasoning above.
+     * Returns `true` immediately (no wait) if there was no previous sequence to drain (e.g.
+     * this is the very first repeating request on a fresh session).
+     */
+    suspend fun updateRepeatingTargetsAwaitingDrain(newTargets: List<Surface>, timeoutMs: Long = 500L): Boolean {
+        val previousCallback = activeRepeatingCallback
+        val drainDeferred = previousCallback?.let { cb ->
+            CompletableDeferred<Unit>().also { deferred -> cb.onSequenceFinished = { deferred.complete(Unit) } }
+        }
+        val issued = updateRepeatingTargets(newTargets)
+        if (!issued) {
+            previousCallback?.onSequenceFinished = null
+            return false
+        }
+        if (drainDeferred == null) return true
+        val drained = withTimeoutOrNull(timeoutMs) { drainDeferred.await() } != null
+        previousCallback.onSequenceFinished = null
+        if (!drained) {
+            Log.w(TAG, "updateRepeatingTargetsAwaitingDrain: previous sequence did not drain within ${timeoutMs}ms")
+        }
+        return drained
+    }
+
+    /**
+     * Stops the repeating request outright (`CameraCaptureSession.stopRepeating()`) rather
+     * than replacing it — for the case [updateRepeatingTargetsAwaitingDrain]'s caller has no
+     * valid non-empty target list to replace it with (docs/
+     * PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2, 2026-07-23 review finding:
+     * e.g. record-stop while backgrounded with no preview Surface *and* no histogram reader
+     * — `setRepeatingRequest` with zero targets throws `IllegalArgumentException`
+     * immediately, so this must be the branch taken instead, not a fallback attempted after
+     * that throw). `stopRepeating()` triggers `onCaptureSequenceAborted` on the previously
+     * active sequence, which this method awaits the same way
+     * [updateRepeatingTargetsAwaitingDrain] does, for the same reason (safe to
+     * `signalEndOfStream()` afterward). Leaves [activeSurfaces] empty and the session
+     * itself still open — a later [updateRepeatingTargets]/[reconfigureSession] resumes
+     * repeating normally.
+     */
+    suspend fun stopRepeatingAwaitingDrain(timeoutMs: Long = 500L): Boolean {
+        val currentSession = session ?: return true
+        val previousCallback = activeRepeatingCallback
+        val drainDeferred = previousCallback?.let { cb ->
+            CompletableDeferred<Unit>().also { deferred -> cb.onSequenceFinished = { deferred.complete(Unit) } }
+        }
+        try {
+            currentSession.stopRepeating()
+        } catch (e: Exception) {
+            Log.w(TAG, "stopRepeatingAwaitingDrain: stopRepeating failed", e)
+            previousCallback?.onSequenceFinished = null
+            return false
+        }
+        activeSurfaces = emptyList()
+        if (drainDeferred == null) return true
+        val drained = withTimeoutOrNull(timeoutMs) { drainDeferred.await() } != null
+        previousCallback.onSequenceFinished = null
+        if (!drained) {
+            Log.w(TAG, "stopRepeatingAwaitingDrain: previous sequence did not drain within ${timeoutMs}ms")
+        }
+        return drained
     }
 
     /**
@@ -315,6 +478,7 @@ class CameraSessionController(private val cameraManager: CameraManager) {
         activeSurfaces = emptyList()
         activeRequestFactory = null
         activeParams = null
+        activeRepeatingCallback = null
     }
 
     /** Call once, after [stop], when this controller will never be reused. */
@@ -393,80 +557,124 @@ class CameraSessionController(private val cameraManager: CameraManager) {
             val builder = buildRequestBuilder(currentDevice, factory, params)
             configure(builder)
             val request = builder.build()
-            CameraSessionMetrics.traceSync("AuCam:setRepeatingRequest") {
-                currentSession.setRepeatingRequest(request, makeCaptureCallback(), callbackHandler)
-            }
-            CameraSessionMetrics.onSetRepeatingRequest(CameraSessionMetrics.RepeatingRequestReason.FOCUS_REQUEST)
+            issueRepeatingRequest(currentSession, request, CameraSessionMetrics.RepeatingRequestReason.FOCUS_REQUEST)
         } catch (e: IllegalStateException) {
             Log.w(TAG, "submitSingleRequest: session/device closed mid-call, ignoring", e)
         }
     }
 
-    private fun makeCaptureCallback(): CameraCaptureSession.CaptureCallback =
-        object : CameraCaptureSession.CaptureCallback() {
-            override fun onCaptureCompleted(
-                session: CameraCaptureSession,
-                request: CaptureRequest,
-                result: TotalCaptureResult,
-            ) {
-                CameraSessionMetrics.onCaptureCallbackInvoked()
-                val startNanos = SystemClock.elapsedRealtimeNanos()
-                val sampled = CameraSessionMetrics.shouldSampleThisFrame()
-                if (sampled) Trace.beginSection("AuCam:captureCallbackSample")
-                val listener = captureResultListener
-                if (listener != null) {
-                    CameraSessionMetrics.onCaptureResultListenerInvoked()
-                    listener.onCaptureResult(result)
-                }
-                if (sampled) Trace.endSection()
-                CameraSessionMetrics.recordCaptureCallbackDurationNanos(
-                    SystemClock.elapsedRealtimeNanos() - startNanos,
-                )
+    /**
+     * `CaptureCallback` used for every repeating request this class issues. Beyond the
+     * existing per-frame [captureResultListener] plumbing, it exposes [onSequenceFinished]
+     * — invoked from `onCaptureSequenceCompleted`/`onCaptureSequenceAborted`, i.e. once
+     * *this specific instance's* repeating sequence has been fully superseded/drained —
+     * for docs/PERSISTENT_ENCODER_SURFACE_DESIGN_2026-07-21.md Phase 2's
+     * [updateRepeatingTargetsAwaitingDrain]/[stopRepeatingAwaitingDrain] to await.
+     */
+    private inner class RepeatingCallback : CameraCaptureSession.CaptureCallback() {
+        var onSequenceFinished: (() -> Unit)? = null
+
+        override fun onCaptureCompleted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            result: TotalCaptureResult,
+        ) {
+            CameraSessionMetrics.onCaptureCallbackInvoked()
+            val startNanos = SystemClock.elapsedRealtimeNanos()
+            val sampled = CameraSessionMetrics.shouldSampleThisFrame()
+            if (sampled) Trace.beginSection("AuCam:captureCallbackSample")
+            val listener = captureResultListener
+            if (listener != null) {
+                CameraSessionMetrics.onCaptureResultListenerInvoked()
+                listener.onCaptureResult(result)
             }
+            if (sampled) Trace.endSection()
+            CameraSessionMetrics.recordCaptureCallbackDurationNanos(
+                SystemClock.elapsedRealtimeNanos() - startNanos,
+            )
         }
+
+        override fun onCaptureSequenceCompleted(session: CameraCaptureSession, sequenceId: Int, frameNumber: Long) {
+            onSequenceFinished?.invoke()
+        }
+
+        override fun onCaptureSequenceAborted(session: CameraCaptureSession, sequenceId: Int) {
+            onSequenceFinished?.invoke()
+        }
+    }
+
+    /**
+     * Every `setRepeatingRequest` call in this class goes through here so
+     * [activeRepeatingCallback] always reflects whichever callback is *actually* live right
+     * now (see that field's doc) — required for [updateRepeatingTargetsAwaitingDrain] to
+     * await the right sequence regardless of which method last touched the repeating
+     * request.
+     */
+    private fun issueRepeatingRequest(
+        captureSession: CameraCaptureSession,
+        request: CaptureRequest,
+        reason: CameraSessionMetrics.RepeatingRequestReason,
+    ) {
+        val callback = RepeatingCallback()
+        CameraSessionMetrics.traceSync("AuCam:setRepeatingRequest") {
+            captureSession.setRepeatingRequest(request, callback, callbackHandler)
+        }
+        activeRepeatingCallback = callback
+        CameraSessionMetrics.onSetRepeatingRequest(reason)
+    }
 
     @RequiresPermission(Manifest.permission.CAMERA)
     private suspend fun openCamera(cameraId: String): CameraDevice =
         CameraSessionMetrics.traceAsync("AuCam:openCamera") {
             CameraSessionMetrics.onOpenCamera()
-            suspendCancellableCoroutine { cont ->
-                cameraManager.openCamera(
-                    cameraId,
-                    object : CameraDevice.StateCallback() {
-                        override fun onOpened(camera: CameraDevice) {
-                            if (cont.isActive) {
-                                cont.resume(camera)
-                            } else {
-                                // The coroutine was cancelled while the camera was opening
-                                // (e.g. the caller backgrounded mid-open) — resume() on an
-                                // already-cancelled continuation silently discards `camera`
-                                // without closing it, leaking the exclusive camera hardware
-                                // lock. That can block every future openCamera() call, by
-                                // this app or another, until the OS eventually reclaims it.
+            // 2026-07-23 real-device finding — see CAMERA_OPERATION_TIMEOUT_MS's doc: bounds
+            // the wait so a HAL that never calls back can't wedge sessionMutex forever.
+            // withTimeout cancels the coroutine below on expiry; the existing
+            // `cont.isActive` checks in each callback already handle a late callback
+            // arriving after that (discarding/closing the resource instead of resuming an
+            // already-cancelled continuation) — that path already existed for the
+            // caller-backgrounded-mid-open case, so no further changes needed here.
+            withTimeout(CAMERA_OPERATION_TIMEOUT_MS) {
+                suspendCancellableCoroutine { cont ->
+                    cameraManager.openCamera(
+                        cameraId,
+                        object : CameraDevice.StateCallback() {
+                            override fun onOpened(camera: CameraDevice) {
+                                if (cont.isActive) {
+                                    cont.resume(camera)
+                                } else {
+                                    // The coroutine was cancelled while the camera was opening
+                                    // (e.g. the caller backgrounded mid-open, or this call
+                                    // timed out) — resume() on an already-cancelled
+                                    // continuation silently discards `camera` without closing
+                                    // it, leaking the exclusive camera hardware lock. That can
+                                    // block every future openCamera() call, by this app or
+                                    // another, until the OS eventually reclaims it.
+                                    camera.close()
+                                }
+                            }
+
+                            override fun onDisconnected(camera: CameraDevice) {
                                 camera.close()
+                                if (cont.isActive) {
+                                    cont.resumeWithException(
+                                        IllegalStateException("Camera $cameraId disconnected"),
+                                    )
+                                }
                             }
-                        }
 
-                        override fun onDisconnected(camera: CameraDevice) {
-                            camera.close()
-                            if (cont.isActive) {
-                                cont.resumeWithException(
-                                    IllegalStateException("Camera $cameraId disconnected"),
-                                )
+                            override fun onError(camera: CameraDevice, error: Int) {
+                                camera.close()
+                                if (cont.isActive) {
+                                    cont.resumeWithException(
+                                        IllegalStateException("Camera $cameraId error: $error"),
+                                    )
+                                }
                             }
-                        }
-
-                        override fun onError(camera: CameraDevice, error: Int) {
-                            camera.close()
-                            if (cont.isActive) {
-                                cont.resumeWithException(
-                                    IllegalStateException("Camera $cameraId error: $error"),
-                                )
-                            }
-                        }
-                    },
-                    callbackHandler,
-                )
+                        },
+                        callbackHandler,
+                    )
+                }
             }
         }
 
@@ -475,32 +683,42 @@ class CameraSessionController(private val cameraManager: CameraManager) {
         surfaces: List<Surface>,
     ): CameraCaptureSession = CameraSessionMetrics.traceAsync("AuCam:createSession") {
         CameraSessionMetrics.onCreateCaptureSession()
-        suspendCancellableCoroutine { cont ->
-            val outputConfigs = surfaces.map { OutputConfiguration(it) }
-            val config = SessionConfiguration(
-                SessionConfiguration.SESSION_REGULAR,
-                outputConfigs,
-                callbackExecutor,
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(session: CameraCaptureSession) {
-                        if (cont.isActive) {
-                            cont.resume(session)
-                        } else {
-                            session.close()
+        // 2026-07-23 real-device finding — see CAMERA_OPERATION_TIMEOUT_MS's doc. This is
+        // the specific call implicated in the real ANR this timeout was added for: a rapid
+        // Activity-relaunch storm mid-recording drove repeated createCaptureSession calls,
+        // and one of them appears to have never invoked onConfigured/onConfigureFailed at
+        // all, permanently parking this coroutine — and, since this runs inside
+        // RecordingPipeline's `sessionMutex.withLock`, permanently locking that mutex too,
+        // wedging every subsequent camera operation app-wide (an ANR, since the main
+        // thread's own Looper was otherwise fine).
+        withTimeout(CAMERA_OPERATION_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                val outputConfigs = surfaces.map { OutputConfiguration(it) }
+                val config = SessionConfiguration(
+                    SessionConfiguration.SESSION_REGULAR,
+                    outputConfigs,
+                    callbackExecutor,
+                    object : CameraCaptureSession.StateCallback() {
+                        override fun onConfigured(session: CameraCaptureSession) {
+                            if (cont.isActive) {
+                                cont.resume(session)
+                            } else {
+                                session.close()
+                            }
                         }
-                    }
 
-                    override fun onConfigureFailed(session: CameraCaptureSession) {
-                        session.close()
-                        if (cont.isActive) {
-                            cont.resumeWithException(
-                                IllegalStateException("Camera session configuration failed"),
-                            )
+                        override fun onConfigureFailed(session: CameraCaptureSession) {
+                            session.close()
+                            if (cont.isActive) {
+                                cont.resumeWithException(
+                                    IllegalStateException("Camera session configuration failed"),
+                                )
+                            }
                         }
-                    }
-                },
-            )
-            cameraDevice.createCaptureSession(config)
+                    },
+                )
+                cameraDevice.createCaptureSession(config)
+            }
         }
     }
 }

@@ -1,0 +1,73 @@
+{
+  "tools/Photos-1-001/AuCamPRO_20260720_114426_690.wav": {
+    "file": "tools/Photos-1-001/AuCamPRO_20260720_114426_690.wav",
+    "sample_rate": 192000,
+    "channels": 2,
+    "duration_sec": 254.9,
+    "clip_threshold_dbfs": -0.2,
+    "clip_min_run_samples": 3,
+    "gain_hint": "クリッピング検出あり → INPUT GAINを下げるか、マイク位置/音源からの距離を見直す",
+    "channels_detail": [
+      {
+        "channel": 0,
+        "peak_dbfs": -0.01,
+        "rms_dbfs_avg": -22.38,
+        "clip_event_count": 4,
+        "clip_total_sec": 0.0,
+        "clip_pct_of_duration": 0.0001,
+        "worst_clip_events": [
+          {
+            "t_start_sec": 150.192,
+            "t_end_sec": 150.192,
+            "peak": 0.9985
+          },
+          {
+            "t_start_sec": 155.746,
+            "t_end_sec": 155.746,
+            "peak": 0.9971
+          },
+          {
+            "t_start_sec": 218.761,
+            "t_end_sec": 218.762,
+            "peak": 0.998
+          },
+          {
+            "t_start_sec": 94.245,
+            "t_end_sec": 94.245,
+            "peak": 0.9964
+          }
+        ]
+      },
+      {
+        "channel": 1,
+        "peak_dbfs": -0.01,
+        "rms_dbfs_avg": -22.38,
+        "clip_event_count": 4,
+        "clip_total_sec": 0.0,
+        "clip_pct_of_duration": 0.0001,
+        "worst_clip_events": [
+          {
+            "t_start_sec": 150.192,
+            "t_end_sec": 150.192,
+            "peak": 0.9985
+          },
+          {
+            "t_start_sec": 155.746,
+            "t_end_sec": 155.746,
+            "peak": 0.9971
+          },
+          {
+            "t_start_sec": 218.761,
+            "t_end_sec": 218.762,
+            "peak": 0.998
+          },
+          {
+            "t_start_sec": 94.245,
+            "t_end_sec": 94.245,
+            "peak": 0.9964
+          }
+        ]
+      }
+    ]
+  }
+}
